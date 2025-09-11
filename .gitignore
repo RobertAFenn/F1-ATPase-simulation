@@ -1,0 +1,16 @@
+# Files
+.DS_Store
+*.pyc
+*.pyo
+*.pyd
+
+# Directories
+__pycache__/
+.vscode/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Virtual environments
+venv/
+env/
