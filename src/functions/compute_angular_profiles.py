@@ -86,7 +86,9 @@ def prep_fine_and_coarse(pos_store, state_store, dt, cstep=10):
 
 
 def compute_profile(positions_deg, velocities_deg_per_ms, states, reference_angles, angle_tolerance, jump_bins):
-    # Computes the mean jump and jump PDFs for a given dataset at specified reference angles.
+    """
+    Computes the mean jump and jump PDFs for a given dataset at specified reference angles.
+    """
 
     n_bins = len(reference_angles)  # Number of reference angles we analyze
 
@@ -153,6 +155,6 @@ def compute_jump_statistics(positions_deg, velocities_deg_per_ms, states, refere
 
     # Compute mean jump from PDF
     bin_centers = (jump_bins[:-1] + jump_bins[1:]) / 2
-    mean_jump = np.sum(jump_pdf * bin_centers * bin_width) 
+    mean_jump = np.sum(jump_pdf * bin_centers * bin_width)
 
     return mean_jump, jump_pdf
