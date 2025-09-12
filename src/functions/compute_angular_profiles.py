@@ -114,6 +114,7 @@ def compute_jump_statistics(positions_deg, velocities_deg_per_ms, states, refere
 
     Here the PDF tells us how likely angular jumps (change in angle per ms) at each reference angle
 
+
     --- Parameters ---
     positions_deg : Angular positions in degrees
     velocities_deg_per_ms : Angular velocity (deg/ms)
