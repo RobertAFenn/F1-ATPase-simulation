@@ -21,7 +21,7 @@ under both deterministic and stochastic forces.
 ---
 
 ## Project Structure
-
+```
 F1-ATPase-simulation/
 ├── docs/ # Flowcharts, project roadmap, diagrams
 ├── src/ # Source code
@@ -32,6 +32,7 @@ F1-ATPase-simulation/
 ├── results/ # Generated figures and data (optional)
 ├── main.ipynb # Notebook for running simulations and experiments
 └── requirements.txt # Python dependencies
+```
 
 ---
 
