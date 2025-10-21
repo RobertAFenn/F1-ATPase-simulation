@@ -21,15 +21,14 @@ under both deterministic and stochastic forces.
 ---
 
 ## Project Structure
+
 ```
 F1-ATPase-simulation/
 ├── docs/ # Flowcharts, project roadmap, diagrams
 ├── src/ # Source code
 │ ├── core/ # Main simulation classes (LangevinGillespie)
-│ ├── utils/ # Helper functions (math, initialization, plotting)
-│ └── config/ # Optional: constants and default parameters
-├── analysis/ # Jupyter notebooks and analysis scripts
-├── results/ # Generated figures and data (optional)
+│ ├── utils/ # Helper functions (math, initialization)
+│ └── analysis/ # Jupyter notebooks and analysis scripts
 ├── main.ipynb # Notebook for running simulations and experiments
 └── requirements.txt # Python dependencies
 ```
@@ -73,29 +72,35 @@ all methods are documented inside the Python file.
 
 ## Usage Example
 
+    from src.utils.compute_transition_matrix import compute_transition_matrix
     from src.core.LangevinGillespie import LangevinGillespie
-    import matplotlib.pyplot as plt
+    import numpy as np
 
-    r = 19  # nm - distance from the rotational axis to the center of the sphere
-    a = 20  # nm - radius of a sphere (See https://en.wikipedia.org/wiki/Stokes_flow)
-    eta = 1e-9  # pN.s/nm^2
-
+    # Simulation Setup
     LG = LangevinGillespie()
-    LG.steps = 1000
+    LG.steps = 2000
     LG.dt = 1e-6
-    LG.kappa = 56
-    LG.kBT = 4.14
-    LG.gammaB = LG.computeGammaB(a, r, eta)
     LG.method = "heun"
 
-    SIM_ANGLE = 0
-    TARGET_ANGLE = SIM_ANGLE
-    LG.theta_0 = LG.initializeTheta(SIM_ANGLE)
-    LG.theta_i = TARGET_ANGLE
+    # Mechanical / Thermal Setup
+    LG.kappa = 56
+    LG.kBT = 4.14
+    LG.gammaB = LG.computeGammaB(a=20, r=19, eta=1e-9)
 
-    simulation_data = LG.simulate()
+    # Multi State Setup
+    LG.theta_states = np.array([3, 36, 72, 116]) * math.pi / 180  # Deg → Rad
+    LG.initial_state = 0  # Starting state
 
-This will return a list of angular positions (θ) over time for the specified parameters.
+    # Transition rate matrix
+    LG.transition_matrix = compute_transition_matrix(LG)
+
+    angles, states, thetas = LG.simulate()
+
+LG.simulate() returns a tuple, containing 3 arrays.
+
+bead_positions: bead angles over time
+states: discrete states over time
+target_thetas: target angles for each step
 
 ---
 
