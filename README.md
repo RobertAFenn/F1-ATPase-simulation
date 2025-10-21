@@ -99,7 +99,9 @@ all methods are documented inside the Python file.
 LG.simulate() returns a tuple, containing 3 arrays.
 
 bead_positions: bead angles over time
+
 states: discrete states over time
+
 target_thetas: target angles for each step
 
 ---
