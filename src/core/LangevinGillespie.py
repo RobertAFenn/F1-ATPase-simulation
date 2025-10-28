@@ -1,5 +1,5 @@
 import math
-import numpy as np  # type: ignore
+import numpy as np
 import random
 import warnings
 
@@ -40,10 +40,16 @@ class LangevinGillespie:
         method_lowered = self.method.lower()
 
         # Step 1: Determine starting angle (local variable, does not overwrite self.theta_0)
-        theta_start = self.theta_0 if self.theta_0 is not None else float(self.theta_states[self.initial_state])
+        theta_start = (
+            self.theta_0
+            if self.theta_0 is not None
+            else float(self.theta_states[self.initial_state])
+        )
 
         # Warn if user-specified theta_0 doesn't match initial state
-        if self.theta_0 is not None and not math.isclose(self.theta_0, self.theta_states[self.initial_state], rel_tol=1e-6):
+        if self.theta_0 is not None and not math.isclose(
+            self.theta_0, self.theta_states[self.initial_state], rel_tol=1e-6
+        ):
             warnings.warn(
                 f"theta_0 ({self.theta_0}) does not match the target angle for initial state "
                 f"({self.theta_states[self.initial_state]}). Simulation will start at theta_0."
@@ -63,7 +69,9 @@ class LangevinGillespie:
         # Step 4: Main simulation loop
         for i in range(1, self.steps):
             # 4a. Determine the next state probabilistically
-            new_state, delta_cycle = self._sample_transition(states[i - 1], rand_gen)  # Randomly Pick next state based on transition matrix
+            new_state, delta_cycle = self._sample_transition(
+                states[i - 1], rand_gen
+            )  # Randomly Pick next state based on transition matrix
             cycle_count += delta_cycle  # Update cycle count if a full rotation occurred
 
             # 4b. Compute the new target angle based on the current state and completed cycles
@@ -74,7 +82,9 @@ class LangevinGillespie:
             target_thetas[i] = new_theta
 
             # 4d. Bead angle update
-            bead_positions[i] = self._update_angle(bead_positions[i - 1], new_theta, method_lowered, rand_gen)
+            bead_positions[i] = self._update_angle(
+                bead_positions[i - 1], new_theta, method_lowered, rand_gen
+            )
 
         return bead_positions, states, target_thetas
 
@@ -84,6 +94,22 @@ class LangevinGillespie:
         return 8 * math.pi * eta * a**3 + 6 * math.pi * eta * a * r**2
 
     # -------------------- Helper functions --------------------
+    def _verify_attributes(self):
+        # Ensure all required attributes have been set before simulation.
+        required_attributes = [
+            "steps",
+            "dt",
+            "gammaB",
+            "kappa",
+            "kBT",
+            "method",
+            "transition_matrix",
+            "initial_state",
+            "theta_states",
+        ]
+        missing = [attr for attr in required_attributes if getattr(self, attr) is None]
+        if missing:
+            raise ValueError(f"Missing attributes: {missing}")
 
     def _sample_transition(self, prev_state, rand_gen):
         """Sample chemical/structural transition from prev_state probabilistically.
@@ -98,22 +124,34 @@ class LangevinGillespie:
         """
 
         #  Grab outgoing rates
-        current_rates = self.transition_matrix[prev_state, :]  # All rates from current state
-        outgoing_rates = np.delete(current_rates, prev_state)  # Remove self-transition, we don't care if we can transition into the same state
-        reaction_indices = np.delete(np.arange(len(current_rates)), prev_state)  # List of states we can move to
+        current_rates = self.transition_matrix[
+            prev_state, :
+        ]  # All rates from current state
+        outgoing_rates = np.delete(
+            current_rates, prev_state
+        )  # Remove self-transition, we don't care if we can transition into the same state
+        reaction_indices = np.delete(
+            np.arange(len(current_rates)), prev_state
+        )  # List of states we can move to
 
         #  Transition probability for this time-step
         total_rate = outgoing_rates.sum()  # Overall speed of leaving the current state
-        p_react = 1.0 - math.exp(-total_rate * self.dt) if total_rate > 0 else 0.0  #  Probability of any state change this dt (Poisson statistics)
+        p_react = (
+            1.0 - math.exp(-total_rate * self.dt) if total_rate > 0 else 0.0
+        )  #  Probability of any state change this dt (Poisson statistics)
 
         new_state = prev_state
         delta_cycle = 0
 
         #  Decide if transition occurs
         if rand_gen.random() < p_react:  # If true, meaning a state change will occur
-            probs = outgoing_rates / total_rate  # np.array: the probabilities of jumping to each state, if a jump happens
+            probs = (
+                outgoing_rates / total_rate
+            )  # np.array: the probabilities of jumping to each state, if a jump happens
             cumulative = np.cumsum(probs)  # probs → CDF
-            chosen_idx = int(np.searchsorted(cumulative, rand_gen.random(), side="right"))  # Weighted CDF pick, returns the bin it falls into
+            chosen_idx = int(
+                np.searchsorted(cumulative, rand_gen.random(), side="right")
+            )  # Weighted CDF pick, returns the bin it falls into
             new_state = reaction_indices[chosen_idx]
             # Count full rotations
             if prev_state == len(self.theta_states) - 1 and new_state == 0:
@@ -143,44 +181,44 @@ class LangevinGillespie:
             case _:
                 raise ValueError("Method must be 'heun', 'euler', or 'probabilistic'")
 
-    def _verify_attributes(self):
-        # Ensure all required attributes have been set before simulation.
-        required_attributes = ["steps", "dt", "gammaB", "kappa", "kBT", "method", "transition_matrix", "initial_state", "theta_states"]
-        missing = [attr for attr in required_attributes if getattr(self, attr) is None]
-        if missing:
-            raise ValueError(f"Missing attributes: {missing}")
-
-    def _drift(self, current_angle, theta_target):
+    def _drift(self, current_angle, target_theta):
         # Deterministic drift term: tendency of bead to relax toward target angle.
-        return -self.kappa * (current_angle - theta_target) / self.gammaB
+        return -self.kappa * (current_angle - target_theta) / self.gammaB
 
     def _diffusion(self):
         # Stochastic diffusion term magnitude for bead motion.
         return math.sqrt(2 * self.kBT / self.gammaB)
 
-    def _heun_1d(self, current_angle, theta_target, rand_gen):
+    def _heun_1d(self, current_angle, target_theta, rand_gen):
         # Heun integration (predictor-corrector) for 1D bead motion.
-        driftX = self._drift(current_angle, theta_target)
-        diffusionX = self._diffusion()
+        drift_term = self._drift(current_angle, target_theta)
+        diffusion_term = self._diffusion()
         eta = rand_gen.gauss(0, 1)
 
         # Predictor step
-        y_predict = current_angle + self.dt * driftX + math.sqrt(self.dt) * diffusionX * eta
+        y_predict = (
+            current_angle
+            + self.dt * drift_term
+            + math.sqrt(self.dt) * diffusion_term * eta
+        )
         # Corrector step
-        drift_predict = self._drift(y_predict, theta_target)
-        return current_angle + (self.dt / 2) * (driftX + drift_predict) + math.sqrt(self.dt) * diffusionX * eta
-
-    def _euler_maruyama(self, current_angle, theta_target, rand_gen):
-        # Euler-Maruyama stochastic integration for bead motion.
+        drift_predict = self._drift(y_predict, target_theta)
         return (
             current_angle
-            + self.dt * self._drift(current_angle, theta_target)
-            + math.sqrt(2 * self.kBT / self.gammaB * self.dt) * rand_gen.gauss(0, 1)
+            + (self.dt / 2) * (drift_term + drift_predict)
+            + math.sqrt(self.dt) * diffusion_term * eta
         )
 
-    def _probabilistic(self, current_angle, theta_target, rand_gen):
+    def _euler_maruyama(self, current_angle, target_theta, rand_gen):
+        # Euler-Maruyama stochastic integration for bead motion.
+        drift_term = self._drift(current_angle, target_theta)
+        diffusion_term = self._diffusion() * math.sqrt(self.dt)
+        eta = rand_gen.gauss(0, 1)
+        return current_angle + self.dt * drift_term + diffusion_term * eta
+
+    def _probabilistic(self, current_angle, target_theta, rand_gen):
         # Probabilistic update using Ornstein-Uhlenbeck analytical solution.
         exp_factor = math.exp(-self.kappa / self.gammaB * self.dt)
-        mean = theta_target + (current_angle - theta_target) * exp_factor
+        mean = target_theta + (current_angle - target_theta) * exp_factor
         std_dev = math.sqrt(self.kBT / self.kappa * (1 - exp_factor**2))
         return mean + std_dev * rand_gen.gauss(0, 1)

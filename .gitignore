@@ -3,6 +3,7 @@
 *.pyc
 *.pyo
 *.pyd
+.editorconfig
 
 # Directories
 __pycache__/
