@@ -17,51 +17,64 @@ namespace py = pybind11;
  * @class LangevinGillespie
  * @brief Implements a multi-state Langevin dynamics simulation with discrete transitions.
  *
+ * Implementation is split between:
+ *  - LangevinGillespie.cpp (src/core/cpp/LangevinGillespie.cpp) : CPU functions (simulate, simulate_multithreaded, computeGammaB)
+ *  - LangevinGillespie.cu  (src/core/cuda/LangevinGillespie.cu) : GPU functions (simulate_multithreaded_gpu)
+ *
+ * Pybind11 bindings can be found in binding.cpp (src/core/binding.cpp)
+ *
  * The LangevinGillespie class simulates a bead subject to thermal noise and elastic forces
  * that transitions between discrete chemical states. Each state corresponds to a target angle,
  * and transitions occur probabilistically according rates held within a transition matrix.
  */
 class LangevinGillespie {
 public:
-    // Simulation Parameters
+    // -=-=-=-=-=-=-=-=-= Simulation Parameters -=-=-=-=-=-=-=-=-=
     std::optional<unsigned int> steps; /** @brief  Number of simulation time steps */
     std::optional<double> dt;          /** @brief Time step size */
     std::optional<std::string> method; /** @brief Integration method:  "heun", "euler", or "probabilistic"*/
 
-    // Physical System Parameters
+    // -=-=-=-=-=-=-=-=-= Physical System Parameters -=-=-=-=-=-=-=-=-=
     std::optional<double> theta_0; /** @brief Initial bead position  (radians)*/
     std::optional<double> kappa;   /** @brief Elastic constant of  the system (pN.nm/rad²)*/
     std::optional<double> kBT;     /** @brief Thermal energy (pN .nm)*/
     std::optional<double> gammaB;  /** @brief Rotational friction coefficient  of the bead (pN.nm.s)*/
 
-    // Multi-state parameters
-    std::optional<std::vector<std::vector<double>>> transition_matrix;/** @brief Transition rate matrix  between states*/
-    std::optional<unsigned int> initial_state;                        /** @brief Index of starting  state*/
-    std::optional<std::vector<double>> theta_states;                  /** @brief Target angles for  each state (in radians)*/
+    // -=-=-=-=-=-=-=-=-= Multi-state Parameters -=-=-=-=-=-=-=-=-=
+    std::optional<std::vector<std::vector<double>>> transition_matrix; /** @brief Transition rate matrix  between states*/
+    std::optional<unsigned int> initial_state;                         /** @brief Index of starting  state*/
+    std::optional<std::vector<double>> theta_states;                   /** @brief Target angles for  each state (in radians)*/
 
     /**
-     * TODO may move this to the cu file, with associated method
-     * For use within cuda only
+     * @brief Parameters for LangevinGillespie simulations, only used within CUDA code
+     *
+     * CUDA device code cannot directly access full C++ classes because of restrictions on memory layout and dynamic features.
+     * Therefore, a plain struct is required to pass simulation parameters to the GPU. For this reason, this parameter
+     * must remain public. Use LangevinGillespie::toStruct() to convert a class instance to this struct.
      */
     struct LGParams {
-        unsigned int steps;
-        float dt;
-        int method; // 0 = heun, 1 = euler, 2 = probabilistic
-        float theta_0;
-        float kappa;
-        float kBT;
-        float gammaB;
+        // -=-=-=-=-=-=-=-=-= Simulation Parameters -=-=-=-=-=-=-=-=-=
+        unsigned int steps; /** @brief  Number of simulation time steps */
+        float dt;           /** @brief Time step size */
+        int method;         /** @brief Integration method:  1 -> "heun", 2 -> "euler", or 3 -> "probabilistic"*/
 
-        unsigned int initial_state;
-        float theta_states[4];
-        float transition_matrix[4 * 4]; // Flatten 2D matrix 
+        // -=-=-=-=-=-=-=-=-= Physical System Parameters -=-=-=-=-=-=-=-=-=
+        float theta_0;  /** @brief Initial bead position  (radians)*/
+        float kappa;    /** @brief Elastic constant of  the system (pN.nm/rad²)*/
+        float kBT;      /** @brief Thermal energy (pN .nm)*/
+        float gammaB;    /** @brief Rotational friction coefficient  of the bead (pN.nm.s)*/
+
+        // -=-=-=-=-=-=-=-=-= Multi-state Parameters -=-=-=-=-=-=-=-=-=
+        unsigned int initial_state;     /** @brief Transition rate matrix  between states*/
+        float theta_states[4];          /** @brief Index of starting  state*/
+        float transition_matrix[4 * 4]; // Flattened 2D matrix /** @brief Target angles for  each state (in radians), flattened 2D matrix*/ 
     };
 
 
     /** @return new instance of LangevinGillespie */
     LangevinGillespie() = default;
 
-    // --------------------- Methods ---------------------
+    // -=-=-=-=-=-=-=-=-= Methods -=-=-=-=-=-=-=-=-=
 
     /**
      * @brief Run a Langevin simulation.
@@ -73,16 +86,32 @@ public:
      *
      * @param seed Optional RNG integer for local reproducibility
      * @returns A tuple containing:
-     *  - bead_positions: array of bead angles over time
-     *  -  states: array of discrete states over time
-     *  - target_thetas: array of target angles for each step
+     *  - std::vector<double> bead_positions: Bead angles over time
+     *  - std::vector<int> states: Discrete states over time
+     *  - std::vector<double> target_thetas: Target angles for each step
      */
     std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
         simulate(const std::optional<unsigned int>& seed = std::nullopt);
 
 
     /**
-     * TODO Add documentation
+     *  @brief Run multiple LangevinGillespie simulations in parallel. nSim is distributed evenly among thread count
+     *
+     *  Distributes nSim simulations evenly among the number of threads specified. Each simulation will run independently,
+     *  then store its results. If a seed is provided, it will be used to initialize RNG for reproducibility. Otherwise,
+     *  each simulation will be randomized independently.
+     *
+     *  The per simulation seed is calculated using the following formula
+     *  sim_seed = seed.value() + thread_start_idx + sim
+     *
+     *  @param nSim The total number of simulations to run
+     *  @param num_threads The number of threads to use for parallel execution
+     *  @param seed Optional RNG integer for local reproducibility. If not provided, simulations are fully randomized.
+     *
+     *  @returns A tuple containing three 2D Vectors
+     *  - std::vector<std::vector<double>> bead_positions: Angles of beads for each simulation over time // TODO convert to numpy arrays for consistency?
+     *  - std::vector<std::vector<int>> states: States for each simulation over time
+     *  - std::vector<std::vector<double>> target_thetas: Target thetas for each simulation over time
      * */
     std::tuple<std::vector<std::vector<double>>, std::vector<std::vector<int>>, std::vector<std::vector<double>>>
         simulate_multithreaded(
@@ -92,19 +121,24 @@ public:
         );
 
     /**
-    * TODO FINISH DOCS
-    *  @brief Runs multiple LangevinGillespie simulations in parallel via CUDA
-    *
-    * ...
-    *
-    * @param nSim
-    * @param num_threads
-    * @param
-    *
-    * @return
-    */
+     * @brief Run multiple LangevinGillespie simulations on the GPU through CUDA
+     *
+     * This method runs on the GPU. Unlike 'simulate_multithreaded" (CPU), each thread on the GPU will run an instance of
+     * the simulation. This allows for large parallelization by utilizing CUDA cores.
+     *
+     * @param nSim The total number of simulations to run
+     * @param seed Optional RNG integer for local reproducibility. If not provided, simulations are fully randomized.
+     *
+     * @return A std::tuple containing three Numpy arrays:
+     * - py::array_t<float> bead_positions: Angles of beads for each simulation over time
+     * - py::array_t<int> states:  States for each simulation over time
+     * - py::array_t<float> target_thetas: Target thetas for each simulation over time
+     *
+     * @note CUDA device code cannot access full C++ classes. To navigate this issue, a struct is passed internally.
+     *       Use 'to_struct' to convert the class if needed
+     */
     std::tuple<py::array_t<float>, py::array_t<int>, py::array_t<float>>
-        simulate_multithreaded_cuda(int nSim, unsigned long long base_seed);
+        simulate_multithreaded_cuda(int nSim, unsigned long long seed);
 
 
     /**
@@ -115,16 +149,16 @@ public:
      * */
     double computeGammaB(double a, double r, double eta);
 
-
-
-
 private:
-    float* d_beads = nullptr;
-    float* d_thetas = nullptr;
-    int* d_states = nullptr;
-    LGParams* d_params = nullptr;
-    size_t current_allocated_size = 0;
-    // --------------------- Helper Methods ---------------------
+    // -=-=-=-=-=-=-=-=-= GPU only parameters -=-=-=-=-=-=-=-=-=
+
+    float* d_beads = nullptr;           /** @brief  Device buffer for bead_angles (GPU only, fallback is zero-copy mapping is unavailable)*/
+    float* d_thetas = nullptr;          /** @brief  Device buffer for target_thetas (GPU only, fallback is zero-copy mapping is unavailable)*/
+    int* d_states = nullptr;            /** @brief  Device buffer for states (GPU only, fallback is zero-copy mapping is unavailable)*/
+    LGParams* d_params = nullptr;       /** @brief  Device copy of simulation parameters struct*/
+    size_t current_allocated_size = 0;  /** @brief  Tracks current size of the device buffers, in order to avoid repeated cudaMalloc calls*/
+
+    // -=-=-=-=-=-=-=-=-= Helper Methods -=-=-=-=-=-=-=-=-=
 
     /**
      * @brief Ensures that all required attributes are properly initialized before simulation.
@@ -148,23 +182,6 @@ private:
      * @return std::mt19937 A fully initialized PRNG instance.
      */
     std::mt19937 create_rng(const std::optional<unsigned int>& seed);
-
-    /**
-     * TODO FINISH DOCS
-     *  @brief Runs multiple LangevinGillespie simulations in parallel via cpu threads
-     *
-     * ...
-     *
-     * @param nSim
-     * @param num_threads
-     * @param
-     *
-     * @return
-     */
-    std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
-        simulate_multithreaded_cpu(unsigned int nSim, unsigned int num_threads, const std::optional<unsigned int>& seed = std::nullopt);
-
-
 
     /**
      * @brief Computes the next transition for the system's current state.
@@ -262,9 +279,18 @@ private:
      */
     double probabilistic(double current_angle, double target_theta, std::mt19937& local_rng) const;
 
-    // TODO CUDA - Reorder
-    /**Add documentation */
+    /**
+     * @brief Converts the current LangevinGillespie class parameters into a cuda compatable LGParams struct
+     *
+     * This function packages all class parameters into the a struct suitable for the GPU kernel.
+     * Points of interest:
+     * - Converts method strings to integers (heun → 0, euler → 1, probabilistic → 2)
+     * - Handles optional theta_0, if null uses theta_states[initial_state]
+     * - Copies up to 4 target angles into theta states, the rest are zeroed
+     * - Flattens a 4x4 transition matrix into a row major float array. Missing entries are zeroed
+     * - Converts all double values to float in order to reduce CUDA device usage
+     *
+     * @return LGParams Struct containing all public parameters
+     */
     LGParams to_struct() const;
-
-
 };
