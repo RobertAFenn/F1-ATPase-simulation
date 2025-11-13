@@ -8,8 +8,11 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <pybind11/pybind11.h>
+#include <pybind11/stl.h> // for std::vector and std::tuple conversion
+#include <pybind11/numpy.h>
 
-
+namespace py = pybind11;
 /**
  * @class LangevinGillespie
  * @brief Implements a multi-state Langevin dynamics simulation with discrete transitions.
@@ -36,6 +39,25 @@ public:
     std::optional<unsigned int> initial_state;                        /** @brief Index of starting  state*/
     std::optional<std::vector<double>> theta_states;                  /** @brief Target angles for  each state (in radians)*/
 
+    /**
+     * TODO may move this to the cu file, with associated method
+     * For use within cuda only
+     */
+    struct LGParams {
+        unsigned int steps;
+        float dt;
+        int method; // 0 = heun, 1 = euler, 2 = probabilistic
+        float theta_0;
+        float kappa;
+        float kBT;
+        float gammaB;
+
+        unsigned int initial_state;
+        float theta_states[4];
+        float transition_matrix[4 * 4]; // Flatten 2D matrix 
+    };
+
+
     /** @return new instance of LangevinGillespie */
     LangevinGillespie() = default;
 
@@ -58,6 +80,33 @@ public:
     std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
         simulate(const std::optional<unsigned int>& seed = std::nullopt);
 
+
+    /**
+     * TODO Add documentation
+     * */
+    std::tuple<std::vector<std::vector<double>>, std::vector<std::vector<int>>, std::vector<std::vector<double>>>
+        simulate_multithreaded(
+            unsigned int nSim,
+            unsigned int num_threads,
+            const std::optional<unsigned int>& seed = std::nullopt
+        );
+
+    /**
+    * TODO FINISH DOCS
+    *  @brief Runs multiple LangevinGillespie simulations in parallel via CUDA
+    *
+    * ...
+    *
+    * @param nSim
+    * @param num_threads
+    * @param
+    *
+    * @return
+    */
+    std::tuple<py::array_t<float>, py::array_t<int>, py::array_t<float>>
+        simulate_multithreaded_cuda(int nSim, unsigned long long base_seed);
+
+
     /**
      * @brief Compute rotational friction coefficient of the bead.
      * @param a Bead radius (nm)
@@ -66,7 +115,15 @@ public:
      * */
     double computeGammaB(double a, double r, double eta);
 
+
+
+
 private:
+    float* d_beads = nullptr;
+    float* d_thetas = nullptr;
+    int* d_states = nullptr;
+    LGParams* d_params = nullptr;
+    size_t current_allocated_size = 0;
     // --------------------- Helper Methods ---------------------
 
     /**
@@ -91,6 +148,23 @@ private:
      * @return std::mt19937 A fully initialized PRNG instance.
      */
     std::mt19937 create_rng(const std::optional<unsigned int>& seed);
+
+    /**
+     * TODO FINISH DOCS
+     *  @brief Runs multiple LangevinGillespie simulations in parallel via cpu threads
+     *
+     * ...
+     *
+     * @param nSim
+     * @param num_threads
+     * @param
+     *
+     * @return
+     */
+    std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
+        simulate_multithreaded_cpu(unsigned int nSim, unsigned int num_threads, const std::optional<unsigned int>& seed = std::nullopt);
+
+
 
     /**
      * @brief Computes the next transition for the system's current state.
@@ -187,4 +261,10 @@ private:
      * @return Updated bead angle
      */
     double probabilistic(double current_angle, double target_theta, std::mt19937& local_rng) const;
+
+    // TODO CUDA - Reorder
+    /**Add documentation */
+    LGParams to_struct() const;
+
+
 };

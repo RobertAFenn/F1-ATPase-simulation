@@ -9,10 +9,13 @@
 __pycache__/
 .vscode/
 anaconda_projects/
+archive/
+Python-3.11.8-build/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
 
 # Virtual environments
-venv/
-env/
+data-Sim_env_linux
+data_sim_env_mac/
+
