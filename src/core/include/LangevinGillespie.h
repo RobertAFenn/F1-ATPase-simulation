@@ -1,32 +1,52 @@
+// src/core/include/LangevinGillespie.h
 #pragma once
 
-#include <cmath>
-#include <optional>
-#include <utility>   // std::pair
-#include <random>    // std::mt19937
-#include <stdexcept> // std::runtime_error
-#include <string>
-#include <tuple>
-#include <vector>
+// -=-=-=-=-=-=-=-=-= STD lib -=-=-=-=-=-=-=-=-=
+#include <cmath>          // std::sqrt, std::abs, std::exp
+#include <optional>       // std::optional
+#include <string>         // std::string
+#include <vector>         // std::vector
+#include <tuple>          // std::tuple
+#include <random>         // std::mt19937
+
+// -=-=-=-=-=-=-=-=-= PYBIND11 -=-=-=-=-=-=-=-=-=
 #include <pybind11/pybind11.h>
-#include <pybind11/stl.h> // for std::vector and std::tuple conversion
+#include <pybind11/stl.h>
 #include <pybind11/numpy.h>
 
 namespace py = pybind11;
+
 /**
- * @class LangevinGillespie
- * @brief Implements a multi-state Langevin dynamics simulation with discrete transitions.
+ * TODO List【=◈︿◈=】 - Delete Later
+ * 1) simulate_multithreaded_cuda()
+ * - The simulation should compute doubles instead of floats (header and cpp file changes needed )
  *
- * Implementation is split between:
- *  - LangevinGillespie.cpp (src/core/cpp/LangevinGillespie.cpp) : CPU functions (simulate, simulate_multithreaded, computeGammaB)
- *  - LangevinGillespie.cu  (src/core/cuda/LangevinGillespie.cu) : GPU functions (simulate_multithreaded_gpu)
+ * 2) simulate_multithreaded()
+ * - Handle multithreaded bottleneck
+ *  Debug Checklist
+ *      - Add timestamps
+ *          - This should confirm no GIL issues
+ *      - Assumption -> Simulations finish rather quickly as work is divided
+ *      - Hypothesis -> The method is spending more time waiting than doing simulation work
+ * - Convert to numpy arrays for consistency
  *
- * Pybind11 bindings can be found in binding.cpp (src/core/binding.cpp)
- *
- * The LangevinGillespie class simulates a bead subject to thermal noise and elastic forces
- * that transitions between discrete chemical states. Each state corresponds to a target angle,
- * and transitions occur probabilistically according rates held within a transition matrix.
+ * After: Update readme with correct information, Update header information (if needed), then push update
  */
+
+ /**
+  * @class LangevinGillespie
+  * @brief Implements a multi-state Langevin dynamics simulation with discrete transitions.
+  *
+  * Implementation is split between:
+  *  - LangevinGillespie.cpp (src/core/cpp/LangevinGillespie.cpp) : CPU functions (simulate, simulate_multithreaded, computeGammaB)
+  *  - LangevinGillespie.cu  (src/core/cuda/LangevinGillespie.cu) : GPU functions (simulate_multithreaded_gpu)
+  *
+  * Pybind11 bindings can be found in binding.cpp (src/core/binding.cpp)
+  *
+  * The LangevinGillespie class simulates a bead subject to thermal noise and elastic forces
+  * that transitions between discrete chemical states. Each state corresponds to a target angle,
+  * and transitions occur probabilistically according rates held within a transition matrix.
+  */
 class LangevinGillespie {
 public:
     // -=-=-=-=-=-=-=-=-= Simulation Parameters -=-=-=-=-=-=-=-=-=
@@ -109,7 +129,7 @@ public:
      *  @param seed Optional RNG integer for local reproducibility. If not provided, simulations are fully randomized.
      *
      *  @returns A tuple containing three 2D Vectors
-     *  - std::vector<std::vector<double>> bead_positions: Angles of beads for each simulation over time // TODO convert to numpy arrays for consistency?
+     *  - std::vector<std::vector<double>> bead_positions: Angles of beads for each simulation over time
      *  - std::vector<std::vector<int>> states: States for each simulation over time
      *  - std::vector<std::vector<double>> target_thetas: Target thetas for each simulation over time
      * */
@@ -188,7 +208,7 @@ private:
      *
      * Given the previous state and a random number generator, this function samples
      * the next state and rotation index according to the transition probabilities.
-     * Each state corresponds to a base angle (from @c theta_states[state]). For every
+     * Each state corresponds to a base angle (from theta_states[state]). For every
      * complete 4-state rotation, 2π/3 radians (120°) are added to maintain continuous
      * angular progression.
      *

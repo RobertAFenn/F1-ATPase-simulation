@@ -1,11 +1,15 @@
-// src/core/bindings.cpp  (full file — paste/replace your existing bindings)
+// src/core/bindings.cpp
 #include "../include/LangevinGillespie.h"
+
+// -=-=-=-=-=-=-=-=-= STD lib -=-=-=-=-=-=-=-=-=
+#include <optional>       // std::optional
+#include <random>         // std::mt19937, distributions
+#include <chrono>         // std::chrono::steady_clock
+#include <cstdint>        // fixed-width integer types
+
+// -=-=-=-=-=-=-=-=-= PYBIND11 -=-=-=-=-=-=-=-=-=
 #include <pybind11/pybind11.h>
 #include <pybind11/numpy.h>
-#include <optional>
-#include <random>
-#include <chrono>
-#include <cstdint>
 
 namespace py = pybind11;
 

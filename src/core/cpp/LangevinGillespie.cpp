@@ -1,17 +1,25 @@
 // src/core/cpp/LangevinGillespie.cpp
 #include "../include/LangevinGillespie.h"
-#include <algorithm>      // for std::min, std::max, std::clamp, std::find, etc.
-#include <cctype>         // for std::tolower (if you normalize "method")
-#include <iostream>
-#include <numeric>        // for std::accumulate (if you sum transition rates)
-#include <numbers>        // math constants
-#include <random>
-#include <thread>
-#include <sstream>
-#include <cmath>
+
+// -=-=-=-=-=-=-=-=-= STD lib -=-=-=-=-=-=-=-=-=
+#include <algorithm>    // std::min, std::max, std::transform
+#include <cctype>       // std::tolower
+#include <iostream>     // std::cerr
+#include <numeric>      // std::accumulate
+#include <numbers>      // std::numbers::pi
+#include <random>       // std::mt19937, std::normal_distribution, std::uniform_real_distribution
+#include <thread>       // std::thread
+#include <sstream>      // std::ostringstream
+#include <cmath>        // std::sqrt, std::abs, std::exp
+
+// TODO TEST IMPORTS 【=◈︿◈=】 DELETE LATER 
+#include <chrono>
+
+// -=-=-=-=-=-=-=-=-= Thread-local Variables -=-=-=-=-=-=-=-=-= 
+static thread_local std::normal_distribution<double> normal_dist(0.0, 1.0);
+static thread_local std::uniform_real_distribution<double> uniform_dist(0.0, 1.0);
 
 // -=-=-=-=-=-=-=-=-= Public Methods -=-=-=-=-=-=-=-=-=
-
 std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
 LangevinGillespie::simulate(const std::optional<unsigned int>& seed) {
     // Step -3: Verify attributes
@@ -58,18 +66,15 @@ LangevinGillespie::simulate(const std::optional<unsigned int>& seed) {
     for (size_t i = 1; i < steps_local; ++i) {
         auto [new_state, delta_cycle] = sample_transition(states[i - 1], rand_gen);
         cycle_count += delta_cycle;
-
         double new_theta = update_theta(new_state, cycle_count);
 
         states[i] = new_state;
         target_thetas[i] = new_theta;
-
         bead_positions[i] = update_angle(bead_positions[i - 1], new_theta, method_lowered, rand_gen);
     }
 
     return { std::move(bead_positions), std::move(states), std::move(target_thetas) };
 }
-
 
 std::tuple<std::vector<std::vector<double>>, std::vector<std::vector<int>>, std::vector<std::vector<double>>>
 LangevinGillespie::simulate_multithreaded(
@@ -77,12 +82,12 @@ LangevinGillespie::simulate_multithreaded(
     unsigned int num_threads,
     const std::optional<unsigned int>& seed
 ) {
+    py::gil_scoped_release release;
+
     // Pre-allocation
     std::vector<std::vector<double>> combined_bead_positions(nSim);
     std::vector<std::vector<int>> combined_states(nSim);
     std::vector<std::vector<double>> combined_target_thetas(nSim);
-
-    py::gil_scoped_release release;
 
     // Divide work
     std::vector<std::thread> threads;
@@ -116,15 +121,13 @@ LangevinGillespie::simulate_multithreaded(
     return { std::move(combined_bead_positions), std::move(combined_states), std::move(combined_target_thetas) };
 }
 
-
 double LangevinGillespie::computeGammaB(double a, double r, double eta) {
     return 8 * std::numbers::pi * eta * (a * a * a) + 6 * std::numbers::pi * eta * a * (r * r);
 }
 
 // -=-=-=-=-=-=-=-=-= Private Helper Methods -=-=-=-=-=-=-=-=-=
-
 void LangevinGillespie::verify_attributes() const {
-    const std::pair<bool, const char*> checks[] = {
+    const std::pair<bool, const char*> required_parameters[] = {
         { steps.has_value(),            "steps" },
         { dt.has_value(),               "dt" },
         { method.has_value(),           "method" },
@@ -138,10 +141,10 @@ void LangevinGillespie::verify_attributes() const {
 
     std::ostringstream oss;
     bool missing_any = false;
-    for (const auto& c : checks) {
-        if (!c.first) {
+    for (const auto& param : required_parameters) {
+        if (!param.first) {
             if (!missing_any) { oss << "Missing attributes: "; missing_any = true; }
-            oss << "[" << c.second << "]";
+            oss << "[" << param.second << "]";
         }
     }
     if (missing_any) throw std::runtime_error(oss.str());
@@ -153,51 +156,48 @@ std::mt19937 LangevinGillespie::create_rng(const std::optional<unsigned int>& se
     return std::mt19937(rd());
 }
 
-// Thread-local distributions to avoid repeated construction
-static thread_local std::normal_distribution<double> thread_normal_dist(0.0, 1.0);
-static thread_local std::uniform_real_distribution<double> thread_uniform_dist(0.0, 1.0);
-
 std::pair<int, int>
 LangevinGillespie::sample_transition(int prev_state, std::mt19937& local_rng) const {
     // Cache commonly used values
-    const auto& trans = transition_matrix.value();
+    const auto& t_matrix = transition_matrix.value();
     const auto dt_local = dt.value();
-    const size_t nStates = trans[prev_state].size();
+    const size_t nStates = t_matrix[prev_state].size();
 
-    std::vector<double> outgoing_rates;
-    std::vector<int> reaction_indices;
+
+    std::vector<double> outgoing_rates; // All rates leaving prev_states to other states
+    std::vector<int> reaction_indices; // Holds corresponding indices to target states
     outgoing_rates.reserve(nStates - 1);
     reaction_indices.reserve(nStates - 1);
 
-    // Removes self transition in outgoing_rates, then we are given the states we can go to
-    for (size_t i = 0; i < nStates; ++i) {
+    // Removes self transition in outgoing_rates, then get the states the simulation can go to
+    for (size_t i = 0; i < nStates; i++) {
         if (static_cast<int>(i) != prev_state) {
-            outgoing_rates.push_back(trans[prev_state][i]);
+            outgoing_rates.push_back(t_matrix[prev_state][i]);
             reaction_indices.push_back(static_cast<int>(i));
         }
     }
 
-    double total_rate = std::accumulate(outgoing_rates.begin(), outgoing_rates.end(), 0.0);
-    double p_react = (total_rate > 0.0) ? 1.0 - std::exp(-total_rate * dt_local) : 0.0;
-
     int new_state = prev_state;
     int delta_cycle = 0;
+    double total_rate = std::accumulate(outgoing_rates.begin(), outgoing_rates.end(), 0.0); // Sum of all transition rates from our current state
+    double p_react = (total_rate > 0.0) ? 1.0 - std::exp(-total_rate * dt_local) : 0.0; // Probability a transition happens this timestep
 
     // Decide if a transition occurs
-    double u = thread_uniform_dist(local_rng);
-    if (u < p_react && total_rate > 0.0) { // If true, meaning a state change occurs
-        // Get probabilities and CDF
-        std::vector<double> cumulative(outgoing_rates.size());
-        double acc = 0.0;
-        for (size_t i = 0; i < outgoing_rates.size(); ++i) {
-            acc += outgoing_rates[i] / total_rate;
-            cumulative[i] = acc;
+    if (uniform_dist(local_rng) < p_react && total_rate > 0.0) { // If true, a state change occurs
+
+        // Get build CDF
+        std::vector<double> prob_CDF(outgoing_rates.size());
+        double prob_accumulation = 0.0;
+        for (size_t i = 0; i < outgoing_rates.size(); i++) {
+            prob_accumulation += outgoing_rates[i] / total_rate;
+            prob_CDF[i] = prob_accumulation;
         }
+
         // Select Next State
-        double r = thread_uniform_dist(local_rng);
-        auto it = std::upper_bound(cumulative.begin(), cumulative.end(), r);
-        size_t idx = std::distance(cumulative.begin(), it);
-        if (idx >= reaction_indices.size()) idx = reaction_indices.size() - 1; // clamp
+        double r = uniform_dist(local_rng);
+        auto it = std::upper_bound(prob_CDF.begin(), prob_CDF.end(), r);
+        size_t idx = std::distance(prob_CDF.begin(), it); // We don't want an iterator, buy rather an integer index
+        if (idx >= reaction_indices.size()) idx = reaction_indices.size() - 1; // clamp due to floating point rounding
         new_state = reaction_indices[idx];
 
         // Count full rotations
@@ -210,7 +210,6 @@ LangevinGillespie::sample_transition(int prev_state, std::mt19937& local_rng) co
 }
 
 double LangevinGillespie::update_theta(int state, int cycle_count) const {
-    // 2*pi/3 is used in your model (kept as expression for clarity)
     return theta_states->at(state) + static_cast<double>(cycle_count) * 2.0 * std::numbers::pi / 3.0;
 }
 
@@ -236,7 +235,7 @@ double LangevinGillespie::diffusion() const {
 double LangevinGillespie::heun_1d(double current_angle, double theta_target, std::mt19937& local_rng) const {
     double drift_term = drift(current_angle, theta_target);
     double diffusion_term = diffusion();
-    double eta = thread_normal_dist(local_rng); // random number ~ N(0,1)
+    double eta = normal_dist(local_rng);
 
     // Predictor step
     double sqrt_dt = std::sqrt(dt.value());
@@ -247,10 +246,11 @@ double LangevinGillespie::heun_1d(double current_angle, double theta_target, std
     return current_angle + (dt.value() / 2.0) * (drift_term + drift_predict) + sqrt_dt * diffusion_term * eta;
 }
 
+
 double LangevinGillespie::euler_maruyama(double current_angle, double theta_target, std::mt19937& local_rng) const {
     double drift_term = drift(current_angle, theta_target);
     double diffusion_term = diffusion() * std::sqrt(dt.value());
-    double eta = thread_normal_dist(local_rng); // random number ~ N(0,1)
+    double eta = normal_dist(local_rng);
     return current_angle + dt.value() * drift_term + diffusion_term * eta;
 }
 
@@ -258,7 +258,7 @@ double LangevinGillespie::probabilistic(double current_angle, double target_thet
     double exp_factor = std::exp(-kappa.value() / gammaB.value() * dt.value());
     double mean = target_theta + (current_angle - target_theta) * exp_factor;
     double std_dev = std::sqrt(kBT.value() / kappa.value() * (1.0 - (exp_factor * exp_factor)));
-    double eta = thread_normal_dist(local_rng);
+    double eta = normal_dist(local_rng);
     return mean + std_dev * eta;
 }
 
@@ -293,6 +293,5 @@ LangevinGillespie::LGParams LangevinGillespie::to_struct() const {
             else params.transition_matrix[i * 4 + j] = 0.0f;
         }
     }
-
     return params;
 }
