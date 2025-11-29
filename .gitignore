@@ -9,9 +9,10 @@
 __pycache__/
 .vscode/
 anaconda_projects/
-archive/
 Python-3.11.8-build/
-build/
+/build/
+/bin/
+/F1-venv/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/

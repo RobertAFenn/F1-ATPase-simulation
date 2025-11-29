@@ -39,6 +39,13 @@ static unsigned long long make_random_seed64() {
     return (s1 << 32) ^ (s2 & 0xffffffffULL);
 }
 
+std::string to_lower(const std::string& str) {
+    std::string result = str;
+    std::transform(result.begin(), result.end(), result.begin(),
+                   [](unsigned char c){ return std::tolower(c); });
+    return result;
+}
+
 PYBIND11_MODULE(f1sim, m) {
     m.doc() = "Pybind11 wrapper exposing the LangevinGillespie class with GPU support";
 
@@ -89,7 +96,7 @@ PYBIND11_MODULE(f1sim, m) {
                 return self.simulate_multithreaded_cuda(nSim, seed_val);
             },
             py::arg("nSim"),
-            py::arg("base_seed") = std::nullopt,
+            py::arg("seed") = std::nullopt,
             "Run multiple Langevin simulations on GPU via CUDA.\n"
             "If base_seed is omitted (None), a random 64-bit seed is generated at the binding level.");
 

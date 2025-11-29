@@ -1,197 +1,305 @@
-// src/core/cuda/LangevinGillespie.cu
+// src/core/cuda/LangevinGillespie_opt.cu
 #include "../include/LangevinGillespie.h"
+#include <stdexcept>
+#include <cuda_runtime.h>
+#include <curand_kernel.h>
+#include <cmath>
+#include <string>
 
-// -=-=-=-=-=-=-=-=-= STD lib -=-=-=-=-=-=-=-=-=
-#include <stdexcept> // std::runtime_error
+#define CUDA_CHECK(call) do { cudaError_t e = (call); if (e != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e)); } while(0)
 
-// -=-=-=-=-=-=-=-=-= Cuda -=-=-=-=-=-=-=-=-=
-#include <cuda_runtime.h>    // cudaMalloc, cudaMemcpy, cudaFree, cudaHostAlloc, cudaDeviceSynchronize, cudaGetLastError
-#include <curand_kernel.h>   // curandState, curand_init, curand_uniform, curand_normal
-#include <cmath>             // sqrtf, expf (host-side math)
-
- // -=-=-=-=-=-=-=-=-= Device Functions -=-=-=-=-=-=-=-=-=
-__device__ float drift(float theta, float target_theta, float kappa, float gammaB) {
+// Device inline helpers (same math as yours)
+__device__ inline double drift_f(double theta, double target_theta, double kappa, double gammaB) {
     return -kappa * (theta - target_theta) / gammaB;
 }
-
-__device__ float diffusion(float kBT, float gammaB) {
+__device__ inline double diffusion_f(double kBT, double gammaB) {
     return sqrtf(2.0f * kBT / gammaB);
 }
-
-__device__ float euler_maruyama(float theta, float target_theta, float dt, float kappa, float kBT, float gammaB, curandState* rng) {
-    float d = drift(theta, target_theta, kappa, gammaB);
-    float s = diffusion(kBT, gammaB) * sqrtf(dt);
-    return theta + dt * d + s * curand_normal(rng);
+__device__ inline double euler_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+    double d = drift_f(theta, target_theta, kappa, gammaB);
+    double s = diffusion_f(kBT, gammaB) * sqrtf(dt);
+    double z = curand_normal(&rng);
+    return theta + dt * d + s * z;
 }
-
-__device__ float heun(float theta, float target_theta, float dt, float kappa, float kBT, float gammaB, curandState* rng) {
-    float d = drift(theta, target_theta, kappa, gammaB);
-    float s = diffusion(kBT, gammaB);
-    float eta = curand_normal(rng);
-
-    float predict = theta + dt * d + sqrtf(dt) * s * eta;
-    float d_predict = drift(predict, target_theta, kappa, gammaB);
+__device__ inline double heun_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+    double d = drift_f(theta, target_theta, kappa, gammaB);
+    double s = diffusion_f(kBT, gammaB);
+    double eta = curand_normal(&rng);
+    double predict = theta + dt * d + sqrtf(dt) * s * eta;
+    double d_predict = drift_f(predict, target_theta, kappa, gammaB);
     return theta + 0.5f * dt * (d + d_predict) + sqrtf(dt) * s * eta;
 }
-
-__device__ float probabilistic(float theta, float target_theta, float dt, float kappa, float kBT, float gammaB, curandState* rng) {
-    float exp_factor = expf(-kappa / gammaB * dt);
-    float mean = target_theta + (theta - target_theta) * exp_factor;
-    float std_dev = sqrtf(kBT / kappa * (1.0f - exp_factor * exp_factor));
-    return mean + std_dev * curand_normal(rng);
+__device__ inline double prob_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+    double exp_factor = expf(-kappa / gammaB * dt);
+    double mean = target_theta + (theta - target_theta) * exp_factor;
+    double std_dev = sqrtf(kBT / kappa * (1.0f - exp_factor * exp_factor));
+    return mean + std_dev * curand_normal(&rng);
 }
 
-// -=-=-=-=-=-=-=-=-= Kernel -=-=-=-=-=-=-=-=-=
-extern "C" __global__ void simulate_kernel(const LangevinGillespie::LGParams* params,
-    float* bead_positions,
-    int* states,
-    float* target_thetas,
+// Common kernel pattern: each kernel implements one integrator so it can be inlined.
+extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGParams* params,
+    double* bead_positions_step_major, // layout: [step * nSim + sim]
+    int* states_step_major,
+    double* target_thetas_step_major,
     int nSim,
     unsigned long long seed) {
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     if (idx >= nSim) return;
 
-    int steps = static_cast<int>(params->steps);
-    curandState rng;
-    curand_init(seed + idx, 0, 0, &rng);
+    // Load params into registers (local variables) to avoid repeated global reads
+    const int steps = static_cast<int>(params->steps);
+    const double dt = params->dt;
+    const double kappa = params->kappa;
+    const double kBT = params->kBT;
+    const double gammaB = params->gammaB;
+    const int initial_state = static_cast<int>(params->initial_state);
+    const double theta_0 = params->theta_0;
+    const double* theta_states = params->theta_states;
+    const double two_pi_over_3 = 2.0f * 3.14159265358979323846f / 3.0f;
+    const double* trans = params->transition_matrix;
 
-    int state = static_cast<int>(params->initial_state);
-    float theta = params->theta_0;
+    // init fast Philox RNG: use seed fixed, sequence = idx (one sequence per thread)
+    curandStatePhilox4_32_10_t rng;
+    curand_init((unsigned long long)seed, (unsigned long long)idx, 0, &rng);
+
+    int state = initial_state;
+    double theta = theta_0;
     int cycle = 0;
 
-    const float two_pi_over_3 = 2.0f * 3.14159265358979323846f / 3.0f;
-
     for (int i = 0; i < steps; ++i) {
-        float target_theta = params->theta_states[state] + cycle * two_pi_over_3;
+        double target_theta = theta_states[state] + cycle * two_pi_over_3;
 
-        // Function pointer array for method selection (reduces divergence)
-        typedef float(*MethodFunc)(float, float, float, float, float, float, curandState*);
-        __shared__ MethodFunc methods[3];
-        if (threadIdx.x == 0) {
-            methods[0] = heun;
-            methods[1] = euler_maruyama;
-            methods[2] = probabilistic;
-        }
+        // step (Euler)
+        theta = euler_step(theta, target_theta, dt, kappa, kBT, gammaB, rng);
 
-        __syncthreads();
+        // coalesced write: step-major layout so threads write adjacent addresses
+        int base = i * nSim + idx;
+        bead_positions_step_major[base] = theta;
+        target_thetas_step_major[base] = target_theta;
+        states_step_major[base] = state;
 
-        theta = methods[params->method](theta, target_theta, params->dt, params->kappa, params->kBT, params->gammaB, &rng);
+        // Gillespie-like switching per-step
+        double total_rate = 0.0f;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
 
-        bead_positions[idx * steps + i] = theta;
-        target_thetas[idx * steps + i] = target_theta;
-        states[idx * steps + i] = state;
-
-        // Compute total transition rate
-        float total_rate = 0.0f;
-
-#pragma unroll
-        for (int j = 0; j < 4; ++j)
-            if (j != state) total_rate += params->transition_matrix[state * 4 + j];
-
-        // Determine if state changes 
-        if (total_rate > 0.0f && curand_uniform(&rng) < 1.0f - expf(-total_rate * params->dt)) {
-            float r = curand_uniform(&rng);
-            float cum = 0.0f;
-            int new_state = state;
-#pragma unroll
-            for (int j = 0; j < 4; ++j) {
-                if (j == state) continue;
-                cum += params->transition_matrix[state * 4 + j] / total_rate;
-                if (r <= cum) { new_state = j; break; }
+        if (total_rate > 0.0f) {
+            double p_jump = 1.0f - expf(-total_rate * dt);
+            if (curand_uniform(&rng) < p_jump) {
+                double r = curand_uniform(&rng);
+                double cum = 0.0f;
+                int new_state = state;
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j == state) continue;
+                    cum += trans[state * 4 + j] / total_rate;
+                    if (r <= cum) { new_state = j; break; }
+                }
+                if (state == 3 && new_state == 0) cycle++;
+                else if (state == 0 && new_state == 3) cycle--;
+                state = new_state;
             }
-
-            if (state == 3 && new_state == 0) cycle++;
-            else if (state == 0 && new_state == 3) cycle--;
-            state = new_state;
         }
     }
 }
 
-// -=-=-=-=-=-=-=-=-= Host Simulation Wrapper -=-=-=-=-=-=-=-=-=
-std::tuple<py::array_t<float>, py::array_t<int>, py::array_t<float>>
+extern "C" __global__ void simulate_kernel_heun(const LangevinGillespie::LGParams* params,
+    double* bead_positions_step_major,
+    int* states_step_major,
+    double* target_thetas_step_major,
+    int nSim,
+    unsigned long long seed) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nSim) return;
+
+    const int steps = static_cast<int>(params->steps);
+    const double dt = params->dt;
+    const double kappa = params->kappa;
+    const double kBT = params->kBT;
+    const double gammaB = params->gammaB;
+    const int initial_state = static_cast<int>(params->initial_state);
+    const double theta_0 = params->theta_0;
+    const double* theta_states = params->theta_states;
+    const double two_pi_over_3 = 2.0f * 3.14159265358979323846f / 3.0f;
+    const double* trans = params->transition_matrix;
+
+    curandStatePhilox4_32_10_t rng;
+    curand_init((unsigned long long)seed, (unsigned long long)idx, 0, &rng);
+
+    int state = initial_state;
+    double theta = theta_0;
+    int cycle = 0;
+
+    for (int i = 0; i < steps; ++i) {
+        double target_theta = theta_states[state] + cycle * two_pi_over_3;
+
+        theta = heun_step(theta, target_theta, dt, kappa, kBT, gammaB, rng);
+
+        int base = i * nSim + idx;
+        bead_positions_step_major[base] = theta;
+        target_thetas_step_major[base] = target_theta;
+        states_step_major[base] = state;
+
+        double total_rate = 0.0f;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
+
+        if (total_rate > 0.0f) {
+            double p_jump = 1.0f - expf(-total_rate * dt);
+            if (curand_uniform(&rng) < p_jump) {
+                double r = curand_uniform(&rng);
+                double cum = 0.0f;
+                int new_state = state;
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j == state) continue;
+                    cum += trans[state * 4 + j] / total_rate;
+                    if (r <= cum) { new_state = j; break; }
+                }
+                if (state == 3 && new_state == 0) cycle++;
+                else if (state == 0 && new_state == 3) cycle--;
+                state = new_state;
+            }
+        }
+    }
+}
+
+extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParams* params,
+    double* bead_positions_step_major,
+    int* states_step_major,
+    double* target_thetas_step_major,
+    int nSim,
+    unsigned long long seed) {
+
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nSim) return;
+
+    const int steps = static_cast<int>(params->steps);
+    const double dt = params->dt;
+    const double kappa = params->kappa;
+    const double kBT = params->kBT;
+    const double gammaB = params->gammaB;
+    const int initial_state = static_cast<int>(params->initial_state);
+    const double theta_0 = params->theta_0;
+    const double* theta_states = params->theta_states;
+    const double two_pi_over_3 = 2.0 * 3.14159265358979323846 / 3.0;
+    const double* trans = params->transition_matrix;
+
+    curandStatePhilox4_32_10_t rng;
+    curand_init((unsigned long long)seed, (unsigned long long)idx, 0, &rng);
+
+    int state = initial_state;
+    double theta = theta_0;
+    int cycle = 0;
+
+    for (int i = 0; i < steps; ++i) {
+        double target_theta = theta_states[state] + cycle * two_pi_over_3;
+
+        theta = prob_step(theta, target_theta, dt, kappa, kBT, gammaB, rng);
+
+        int base = i * nSim + idx;
+        bead_positions_step_major[base] = theta;
+        target_thetas_step_major[base] = target_theta;
+        states_step_major[base] = state;
+
+        double total_rate = 0.0f;
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
+
+        if (total_rate > 0.0f) {
+            double p_jump = 1.0f - expf(-total_rate * dt);
+            if (curand_uniform(&rng) < p_jump) {
+                double r = curand_uniform(&rng);
+                double cum = 0.0f;
+                int new_state = state;
+                #pragma unroll
+                for (int j = 0; j < 4; ++j) {
+                    if (j == state) continue;
+                    cum += trans[state * 4 + j] / total_rate;
+                    if (r <= cum) { new_state = j; break; }
+                }
+                if (state == 3 && new_state == 0) cycle++;
+                else if (state == 0 && new_state == 3) cycle--;
+                state = new_state;
+            }
+        }
+    }
+}
+
+std::tuple<py::array_t<double>, py::array_t<int>, py::array_t<double>>
 LangevinGillespie::simulate_multithreaded_cuda(int nSim, unsigned long long seed) {
     this->verify_attributes();
     LGParams h_params = this->to_struct();
     size_t steps = static_cast<size_t>(h_params.steps);
-    size_t total_elements = nSim * steps;
+    size_t total_elements = (size_t)nSim * steps;
 
     py::ssize_t dim0 = nSim;
     py::ssize_t dim1 = steps;
 
-    // Allocate device struct if needed
-    if (!d_params) cudaMalloc(&d_params, sizeof(LGParams));
-    cudaMemcpy(d_params, &h_params, sizeof(LGParams), cudaMemcpyHostToDevice);
+    // copy params to device
+    if (!d_params) CUDA_CHECK(cudaMalloc(&d_params, sizeof(LGParams)));
+    CUDA_CHECK(cudaMemcpy(d_params, &h_params, sizeof(LGParams), cudaMemcpyHostToDevice));
 
-    // Attempt pinned mapped host memory
-    float* h_beads = nullptr, * h_thetas = nullptr;
+    // allocate device buffers (step-major layout: [step * nSim + sim])
+    double* d_beads = nullptr;
+    double* d_thetas = nullptr;
+    int* d_states = nullptr;
+    CUDA_CHECK(cudaMalloc(&d_beads, total_elements * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_thetas, total_elements * sizeof(double)));
+    CUDA_CHECK(cudaMalloc(&d_states, total_elements * sizeof(int)));
+
+    // allocate pinned host buffers for copy target (faster async copies)
+    double* h_beads = nullptr;
+    double* h_thetas = nullptr;
     int* h_states = nullptr;
-    float* d_beads_ptr = nullptr, * d_thetas_ptr = nullptr;
-    int* d_states_ptr = nullptr;
+    CUDA_CHECK(cudaHostAlloc((void**)&h_beads, total_elements * sizeof(double), cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc((void**)&h_thetas, total_elements * sizeof(double), cudaHostAllocDefault));
+    CUDA_CHECK(cudaHostAlloc((void**)&h_states, total_elements * sizeof(int), cudaHostAllocDefault));
 
-    bool using_mapped = false;
-    if (cudaHostAlloc(&h_beads, total_elements * sizeof(float), cudaHostAllocMapped) == cudaSuccess) {
-        cudaHostAlloc(&h_thetas, total_elements * sizeof(float), cudaHostAllocMapped);
-        cudaHostAlloc(&h_states, total_elements * sizeof(int), cudaHostAllocMapped);
-
-        cudaHostGetDevicePointer(&d_beads_ptr, h_beads, 0);
-        cudaHostGetDevicePointer(&d_thetas_ptr, h_thetas, 0);
-        cudaHostGetDevicePointer(&d_states_ptr, h_states, 0);
-        using_mapped = true;
-    } else {
-        if (current_allocated_size < total_elements) {
-            if (d_beads) cudaFree(d_beads);
-            if (d_thetas) cudaFree(d_thetas);
-            if (d_states) cudaFree(d_states);
-            cudaMalloc(&d_beads, total_elements * sizeof(float));
-            cudaMalloc(&d_thetas, total_elements * sizeof(float));
-            cudaMalloc(&d_states, total_elements * sizeof(int));
-            current_allocated_size = total_elements;
-        }
-        d_beads_ptr = d_beads;
-        d_thetas_ptr = d_thetas;
-        d_states_ptr = d_states;
-    }
-
-    // Launch kernel
+    // launch kernel
     const int block_size = 256;
     const int grid_size = (nSim + block_size - 1) / block_size;
-    simulate_kernel << <grid_size, block_size >> > (d_params, d_beads_ptr, d_states_ptr, d_thetas_ptr, nSim, seed);
 
-    cudaDeviceSynchronize();
+    // choose kernel by method (0=euler,1=heun,2=prob)
+    int method = static_cast<int>(h_params.method);
+    if (method == 0) simulate_kernel_euler<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
+    else if (method == 1) simulate_kernel_heun<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
+    else simulate_kernel_prob<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
+
+    // async copy device -> pinned host and synchronize
+    CUDA_CHECK(cudaMemcpyAsync(h_beads, d_beads, total_elements * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_thetas, d_thetas, total_elements * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(h_states, d_states, total_elements * sizeof(int), cudaMemcpyDeviceToHost));
+
+    CUDA_CHECK(cudaDeviceSynchronize());
     cudaError_t err = cudaGetLastError();
-    if (err != cudaSuccess)
-        throw std::runtime_error("CUDA kernel launch failed: " + std::string(cudaGetErrorString(err)));
+    if (err != cudaSuccess) throw std::runtime_error("CUDA kernel failed: " + std::string(cudaGetErrorString(err)));
 
-    // Wrap as numpy arrays
-    if (!using_mapped) {
-        std::vector<float> h_beads_vec(total_elements);
-        std::vector<float> h_thetas_vec(total_elements);
-        std::vector<int> h_states_vec(total_elements);
-
-        cudaMemcpy(h_beads_vec.data(), d_beads, total_elements * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_thetas_vec.data(), d_thetas, total_elements * sizeof(float), cudaMemcpyDeviceToHost);
-        cudaMemcpy(h_states_vec.data(), d_states, total_elements * sizeof(int), cudaMemcpyDeviceToHost);
-
-        py::array_t<float> py_beads({ dim0, dim1 }, h_beads_vec.data());
-        py::array_t<float> py_thetas({ dim0, dim1 }, h_thetas_vec.data());
-        py::array_t<int> py_states({ dim0, dim1 }, h_states_vec.data());
-        return { py_beads, py_states, py_thetas };
-    }
-
-    auto free_float_host = [](void* p) { if (p) cudaFreeHost(p); };
+    // Build numpy arrays WITHOUT additional copy by setting strides so logical (nSim, steps)
+    // buffer layout is step-major: index = step * nSim + sim
+    // so element (sim, step) in logical array is at offset: step * nSim + sim
+    // therefore strides are: sim_stride = sizeof(element), step_stride = nSim * sizeof(element)
+    auto free_double_host = [](void* p) { if (p) cudaFreeHost(p); };
     auto free_int_host = [](void* p) { if (p) cudaFreeHost(p); };
 
-    py::capsule beads_capsule(h_beads, free_float_host);
-    py::capsule thetas_capsule(h_thetas, free_float_host);
+    py::capsule beads_capsule(h_beads, free_double_host);
+    py::capsule thetas_capsule(h_thetas, free_double_host);
     py::capsule states_capsule(h_states, free_int_host);
 
-    py::array py_beads(py::buffer_info(h_beads, sizeof(float), py::format_descriptor<float>::format(),
-        2, { dim0, dim1 }, { dim1 * sizeof(float), sizeof(float) }), beads_capsule);
-    py::array py_thetas(py::buffer_info(h_thetas, sizeof(float), py::format_descriptor<float>::format(),
-        2, { dim0, dim1 }, { dim1 * sizeof(float), sizeof(float) }), thetas_capsule);
+    // double buffer_info: ptr, itemsize, format, ndim, shape, strides
+    py::array py_beads(py::buffer_info(h_beads, sizeof(double), py::format_descriptor<double>::format(),
+        2, { dim0, dim1 }, { sizeof(double), dim0 * sizeof(double) }), beads_capsule);
+    py::array py_thetas(py::buffer_info(h_thetas, sizeof(double), py::format_descriptor<double>::format(),
+        2, { dim0, dim1 }, { sizeof(double), dim0 * sizeof(double) }), thetas_capsule);
     py::array py_states(py::buffer_info(h_states, sizeof(int), py::format_descriptor<int>::format(),
-        2, { dim0, dim1 }, { dim1 * sizeof(int), sizeof(int) }), states_capsule);
+        2, { dim0, dim1 }, { sizeof(int), dim0 * sizeof(int) }), states_capsule);
 
-    return { py_beads.cast<py::array_t<float>>(), py_states.cast<py::array_t<int>>(), py_thetas.cast<py::array_t<float>>() };
+    // free device buffers (keep host pinned buffers for Python's ownership)
+    CUDA_CHECK(cudaFree(d_beads));
+    CUDA_CHECK(cudaFree(d_thetas));
+    CUDA_CHECK(cudaFree(d_states));
+
+    return { py_beads.cast<py::array_t<double>>(), py_states.cast<py::array_t<int>>(), py_thetas.cast<py::array_t<double>>() };
 }

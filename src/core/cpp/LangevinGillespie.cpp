@@ -12,8 +12,6 @@
 #include <sstream>      // std::ostringstream
 #include <cmath>        // std::sqrt, std::abs, std::exp
 
-// TODO TEST IMPORTS 【=◈︿◈=】 DELETE LATER 
-#include <chrono>
 
 // -=-=-=-=-=-=-=-=-= Thread-local Variables -=-=-=-=-=-=-=-=-= 
 static thread_local std::normal_distribution<double> normal_dist(0.0, 1.0);
@@ -21,105 +19,107 @@ static thread_local std::uniform_real_distribution<double> uniform_dist(0.0, 1.0
 
 // -=-=-=-=-=-=-=-=-= Public Methods -=-=-=-=-=-=-=-=-=
 std::tuple<std::vector<double>, std::vector<int>, std::vector<double>>
-LangevinGillespie::simulate(const std::optional<unsigned int>& seed) {
-    // Step -3: Verify attributes
+LangevinGillespie::simulate(
+    const std::optional<unsigned int>& seed
+) {
     verify_attributes();
+    std::mt19937 rng = create_rng(seed);
 
-    // Step -2: Setup RNG
-    std::mt19937 rand_gen = create_rng(seed);
+    std::vector<double> bead_positions(steps.value());
+    std::vector<int> states(steps.value());
+    std::vector<double> target_thetas(steps.value());
 
-    // Step -1: Method cleaning (cache once)
-    std::string method_lowered = method.value();
-    std::transform(method_lowered.begin(), method_lowered.end(), method_lowered.begin(),
-        [](unsigned char c) { return std::tolower(c); });
+    bead_positions[0] = theta_0.value_or(theta_states.value()[initial_state.value()]);
+    states[0] = initial_state.value();
+    target_thetas[0] = theta_states.value()[initial_state.value()];
 
-    // Cache frequently-used optionals locally
-    const auto steps_local = static_cast<size_t>(steps.value());
-    const auto init_state_local = initial_state.value();
-    const auto& theta_states_local = theta_states.value();
-
-    // Step 0: Starting angle
-    double theta_start = theta_0.has_value() ? theta_0.value() : theta_states_local[init_state_local];
-
-    if (theta_0.has_value()) {
-        double target = theta_states_local[init_state_local];
-        double rel_tol = 1e-6;
-        if (std::abs(theta_0.value() - target) > rel_tol * std::abs(target)) {
-            std::cerr << "Warning: theta_0 (" << theta_0.value()
-                << ") does not match the target angle for initial state ("
-                << target << "). Simulation will start at theta_0.\n";
-        }
-    }
-
-    // Step 1: Allocate vectors
-    std::vector<double> bead_positions(steps_local);
-    std::vector<int> states(steps_local);
-    std::vector<double> target_thetas(steps_local);
-
-    // Step 2: Initialize first values
-    bead_positions[0] = theta_start;
-    states[0] = init_state_local;
-    target_thetas[0] = theta_states_local[init_state_local];
     int cycle_count = 0;
 
-    // Step 3: Main loop
-    for (size_t i = 1; i < steps_local; ++i) {
-        auto [new_state, delta_cycle] = sample_transition(states[i - 1], rand_gen);
+    for (size_t i = 1; i < steps.value(); i++) {
+        auto [new_state, delta_cycle] = sample_transition(states[i - 1], rng);
         cycle_count += delta_cycle;
         double new_theta = update_theta(new_state, cycle_count);
 
         states[i] = new_state;
         target_thetas[i] = new_theta;
-        bead_positions[i] = update_angle(bead_positions[i - 1], new_theta, method_lowered, rand_gen);
+        bead_positions[i] = update_angle(bead_positions[i - 1], new_theta, method.value(), rng);
     }
 
-    return { std::move(bead_positions), std::move(states), std::move(target_thetas) };
+    return { bead_positions, states, target_thetas };
 }
 
-std::tuple<std::vector<std::vector<double>>, std::vector<std::vector<int>>, std::vector<std::vector<double>>>
-LangevinGillespie::simulate_multithreaded(
+py::tuple LangevinGillespie::simulate_multithreaded(
     unsigned int nSim,
     unsigned int num_threads,
     const std::optional<unsigned int>& seed
 ) {
+    verify_attributes();
+
+    unsigned int sys_thread_count = std::thread::hardware_concurrency();
+    if (num_threads < 1 || num_threads > sys_thread_count) {
+        throw std::runtime_error(
+            std::to_string(num_threads) + " is not a valid thread number! "
+            "Must be between 1 and " + std::to_string(sys_thread_count) + "."
+        );
+    }
+
     py::gil_scoped_release release;
 
-    // Pre-allocation
-    std::vector<std::vector<double>> combined_bead_positions(nSim);
-    std::vector<std::vector<int>> combined_states(nSim);
-    std::vector<std::vector<double>> combined_target_thetas(nSim);
+    size_t per_sim_size = steps.value();
 
-    // Divide work
+    // Preallocate flat buffers
+    std::vector<double> combined_bead_positions(nSim * per_sim_size);
+    std::vector<int> combined_states(nSim * per_sim_size);
+    std::vector<double> combined_target_thetas(nSim * per_sim_size);
+
     std::vector<std::thread> threads;
     threads.reserve(num_threads);
+
     unsigned int work_per_thread = nSim / num_threads;
     unsigned int remainder = nSim % num_threads;
     unsigned int start_idx = 0;
 
-    for (unsigned int tid = 0; tid < num_threads; ++tid) {
+    for (unsigned int tid = 0; tid < num_threads; tid++) {
         unsigned int sims_for_this_thread = work_per_thread + (tid < remainder ? 1 : 0);
         unsigned int thread_start_idx = start_idx;
         start_idx += sims_for_this_thread;
 
-        threads.emplace_back([this, sims_for_this_thread, thread_start_idx, seed,
-            &combined_bead_positions, &combined_states, &combined_target_thetas]() {
-                for (unsigned int sim = 0; sim < sims_for_this_thread; ++sim) {
-                    std::optional<unsigned int> sim_seed;
-                    if (seed.has_value()) sim_seed = seed.value() + thread_start_idx + sim;
+        threads.emplace_back([=, &combined_bead_positions, &combined_states, &combined_target_thetas, this]() {
+            for (unsigned int sim = 0; sim < sims_for_this_thread; sim++) {
+                std::optional<unsigned int> sim_seed;
+                if (seed.has_value())
+                    sim_seed = seed.value() + thread_start_idx + sim;
 
-                    auto [local_beads, local_states, local_thetas] = simulate(sim_seed);
+                auto [local_beads, local_states, local_thetas] = simulate(sim_seed);
 
-                    unsigned int sim_idx = thread_start_idx + sim;
-                    combined_bead_positions[sim_idx] = std::move(local_beads);
-                    combined_states[sim_idx] = std::move(local_states);
-                    combined_target_thetas[sim_idx] = std::move(local_thetas);
-                }
+                size_t offset = (thread_start_idx + sim) * per_sim_size;
+
+                std::copy(local_beads.begin(), local_beads.end(), combined_bead_positions.begin() + offset);
+                std::copy(local_states.begin(), local_states.end(), combined_states.begin() + offset);
+                std::copy(local_thetas.begin(), local_thetas.end(), combined_target_thetas.begin() + offset);
+            }
             });
     }
 
+    // Join threads
     for (auto& t : threads) t.join();
-    return { std::move(combined_bead_positions), std::move(combined_states), std::move(combined_target_thetas) };
+
+    py::gil_scoped_acquire acquire;  // reacquire GIL before returning NumPy arrays
+
+    // Define shapes and strides
+    std::vector<ssize_t> shape = { static_cast<ssize_t>(nSim), static_cast<ssize_t>(per_sim_size) };
+    std::vector<ssize_t> strides_double = { static_cast<ssize_t>(sizeof(double) * per_sim_size), static_cast<ssize_t>(sizeof(double)) };
+    std::vector<ssize_t> strides_int = { static_cast<ssize_t>(sizeof(int) * per_sim_size), static_cast<ssize_t>(sizeof(int)) };
+
+    // Wrap flat buffers into NumPy arrays
+    py::array_t<double> beads_array(shape, strides_double, combined_bead_positions.data());
+    py::array_t<int> states_array(shape, strides_int, combined_states.data());
+    py::array_t<double> thetas_array(shape, strides_double, combined_target_thetas.data());
+
+    return py::make_tuple(beads_array, states_array, thetas_array);
 }
+
+
 
 double LangevinGillespie::computeGammaB(double a, double r, double eta) {
     return 8 * std::numbers::pi * eta * (a * a * a) + 6 * std::numbers::pi * eta * a * (r * r);
@@ -147,7 +147,26 @@ void LangevinGillespie::verify_attributes() const {
             oss << "[" << param.second << "]";
         }
     }
-    if (missing_any) throw std::runtime_error(oss.str());
+    if (missing_any) throw std::invalid_argument(oss.str() + " must be initialized before calling this method!");
+
+    // Enforce data boundaries
+    if (steps.value() < 1) throw std::invalid_argument("Parameter steps must be greater than 0!");
+    if (dt.value() <= 0) throw std::invalid_argument("Parameter dt must be greater than 0!");
+    if (method.value() != "heun" && method.value() != "euler" && method.value() != "probabilistic")
+        throw std::invalid_argument("Method must be 'heun', 'euler', or 'probabilistic'!");
+    if (kappa.value() < 0) throw std::invalid_argument("Parameter kappa must be greater than or equal to 0!");
+    if (kBT.value() < 0) throw std::invalid_argument("Parameter kBT must be greater than or equal to 0!");
+    if (gammaB.value() < 0) throw std::invalid_argument("Parameter gammaB must be greater than or equal to 0!");
+    if (transition_matrix.value().size() != 4) throw std::invalid_argument("transition_matrix must be of size 4. The current size is " + std::to_string(transition_matrix.value().size()));
+
+    // Ensure each row is also 4 and each p is [-1,1]   
+    for (size_t i = 0; i < transition_matrix.value().size(); i++) {
+        if (transition_matrix.value()[i].size() != 4)
+            throw std::invalid_argument("Row " + std::to_string(i) + " of transition_matrix must have 4 columns");
+    }
+
+    if (initial_state < 0 || initial_state > 3) throw std::out_of_range("initial_state must be between 0 and 3");
+    if (theta_states.value().size() != 4)  throw std::invalid_argument("theta_states must be of size 4. The current size is " + std::to_string(theta_states.value().size()));
 }
 
 std::mt19937 LangevinGillespie::create_rng(const std::optional<unsigned int>& seed) {
@@ -159,6 +178,7 @@ std::mt19937 LangevinGillespie::create_rng(const std::optional<unsigned int>& se
 std::pair<int, int>
 LangevinGillespie::sample_transition(int prev_state, std::mt19937& local_rng) const {
     // Cache commonly used values
+    // TODO why did you do this..? Remove local values 
     const auto& t_matrix = transition_matrix.value();
     const auto dt_local = dt.value();
     const size_t nStates = t_matrix[prev_state].size();
@@ -196,8 +216,8 @@ LangevinGillespie::sample_transition(int prev_state, std::mt19937& local_rng) co
         // Select Next State
         double r = uniform_dist(local_rng);
         auto it = std::upper_bound(prob_CDF.begin(), prob_CDF.end(), r);
-        size_t idx = std::distance(prob_CDF.begin(), it); // We don't want an iterator, buy rather an integer index
-        if (idx >= reaction_indices.size()) idx = reaction_indices.size() - 1; // clamp due to floating point rounding
+        size_t idx = std::distance(prob_CDF.begin(), it); // We don't want an iterator, but rather an integer index
+        if (idx >= reaction_indices.size()) idx = reaction_indices.size() - 1; // clamp due to doubleing point rounding
         new_state = reaction_indices[idx];
 
         // Count full rotations
@@ -265,31 +285,31 @@ double LangevinGillespie::probabilistic(double current_angle, double target_thet
 LangevinGillespie::LGParams LangevinGillespie::to_struct() const {
     LGParams params{};
     params.steps = static_cast<unsigned int>(steps.value());
-    params.dt = static_cast<float>(dt.value());
+    params.dt = static_cast<double>(dt.value());
 
     // map method string -> int (0=heun,1=euler,2=probabilistic)
     std::string m = method.value();
     std::transform(m.begin(), m.end(), m.begin(), [](unsigned char c) { return std::tolower(c); });
 
     params.method = (m == "heun") ? 0 : (m == "euler") ? 1 : 2;
-    params.theta_0 = static_cast<float>(theta_0.has_value() ? theta_0.value() : theta_states.value().at(initial_state.value()));
-    params.kappa = static_cast<float>(kappa.value());
-    params.kBT = static_cast<float>(kBT.value());
-    params.gammaB = static_cast<float>(gammaB.value());
-    params.initial_state = static_cast<unsigned int>(initial_state.value());
+    params.theta_0 = static_cast<double>(theta_0.has_value() ? theta_0.value() : theta_states.value().at(initial_state.value()));
+    params.kappa = static_cast<double>(kappa.value());
+    params.kBT = static_cast<double>(kBT.value());
+    params.gammaB = static_cast<double>(gammaB.value());
+    params.initial_state = static_cast<int>(initial_state.value());
 
     // Copy theta_states (copy up to params capacity)
     const auto& ts = theta_states.value();
     const size_t n_ts = std::min(ts.size(), std::size(params.theta_states));
-    for (size_t i = 0; i < n_ts; ++i) params.theta_states[i] = static_cast<float>(ts[i]);
-    for (size_t i = n_ts; i < std::size(params.theta_states); ++i) params.theta_states[i] = 0.0f; // zero any remaining entries
+    for (size_t i = 0; i < n_ts; i++) params.theta_states[i] = static_cast<double>(ts[i]);
+    for (size_t i = n_ts; i < std::size(params.theta_states); i++) params.theta_states[i] = 0.0f; // zero any remaining entries
 
-    // Flatten transition_matrix into row-major float array
+    // Flatten transition_matrix into row-major double array
     const auto& tm = transition_matrix.value();
     const size_t nrows = std::min(tm.size(), static_cast<size_t>(4));
-    for (size_t i = 0; i < 4; ++i) {
-        for (size_t j = 0; j < 4; ++j) {
-            if (i < nrows && j < tm[i].size()) params.transition_matrix[i * 4 + j] = static_cast<float>(tm[i][j]);
+    for (size_t i = 0; i < 4; i++) {
+        for (size_t j = 0; j < 4; j++) {
+            if (i < nrows && j < tm[i].size()) params.transition_matrix[i * 4 + j] = static_cast<double>(tm[i][j]);
             else params.transition_matrix[i * 4 + j] = 0.0f;
         }
     }

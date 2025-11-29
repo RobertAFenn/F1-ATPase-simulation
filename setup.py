@@ -6,6 +6,7 @@ import sysconfig
 import pybind11
 import os
 import shutil
+from distutils.cmd import Command
 
 # C++ and NVCC compilation flags
 CXX_FLAGS = ["-O3", "-std=c++20", "-fPIC", "-Wall"]
@@ -49,8 +50,7 @@ class BuildExtension(build_ext):
 
         super().build_extensions()
 
-        # Optional: move final .so into a bin/ folder for clarity
-        self._move_so_to_bin()
+        self._move_so_to_bin()  # Move the so file
 
     def _compile_cuda_sources(self, ext):
         sources = list(ext.sources)
@@ -100,10 +100,42 @@ ext_modules = [
     )
 ]
 
+
+class Clean(Command):
+    description = "Remove build directories + compiled .o object files"
+    user_options = []
+
+    def initialize_options(self):
+        pass
+
+    def finalize_options(self):
+        pass
+
+    def run(self):
+        # Remove build/ and dist/
+        for folder in ["build", "dist", "__pycache__"]:
+            if os.path.exists(folder):
+                shutil.rmtree(folder)
+                print(f"Removed {folder}/")
+
+        # Remove compiled CUDA object files
+        for root, _, files in os.walk("src"):
+            for f in files:
+                if f.endswith(".o"):
+                    filepath = os.path.join(root, f)
+                    os.remove(filepath)
+                    print(f"Deleted {filepath}")
+
+        print("Cleanup complete.")
+
+
 setup(
     name="f1sim",
     version="0.1",
     author="Robert",
     ext_modules=ext_modules,
-    cmdclass={"build_ext": BuildExtension},
+    cmdclass={
+        "build_ext": BuildExtension,
+        "clean": Clean,
+    },
 )

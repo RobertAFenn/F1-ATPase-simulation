@@ -18,19 +18,22 @@ namespace py = pybind11;
 
 /**
  * TODO List【=◈︿◈=】 - Delete Later
- * 1) simulate_multithreaded_cuda()
- * - The simulation should compute doubles instead of floats (header and cpp file changes needed )
+ * * 1) simulate_multithreaded_cuda()
+ * * The simulation should compute doubles instead of doubles (header and cpp file changes needed )
  *
- * 2) simulate_multithreaded()
- * - Handle multithreaded bottleneck
- *  Debug Checklist
- *      - Add timestamps
- *          - This should confirm no GIL issues
- *      - Assumption -> Simulations finish rather quickly as work is divided
- *      - Hypothesis -> The method is spending more time waiting than doing simulation work
- * - Convert to numpy arrays for consistency
+ * * 2) simulate_multithreaded()
+ * * Handle multithreaded bottleneck
+ * * Debug Checklist
+ * *    - Add timestamps
+ * *         - This should confirm no GIL issues
+ * *    - Assumption -> Simulations finish rather quickly as work is divided
+ * *    - Hypothesis -> The method is spending more time waiting than doing simulation work
+ * *    Convert to numpy arrays for consistency
+ * *        After fix: It turns out that, python did not like our initial conversion
  *
- * After: Update readme with correct information, Update header information (if needed), then push update
+ * 3) Should go in on either fully using doubles or doubles for parameters (LG class for example)
+ *
+ * ! IMPORTANT After: Update readme with correct information, Update header information (if needed), then push update
  */
 
  /**
@@ -61,9 +64,9 @@ public:
     std::optional<double> gammaB;  /** @brief Rotational friction coefficient  of the bead (pN.nm.s)*/
 
     // -=-=-=-=-=-=-=-=-= Multi-state Parameters -=-=-=-=-=-=-=-=-=
-    std::optional<std::vector<std::vector<double>>> transition_matrix; /** @brief Transition rate matrix  between states*/
-    std::optional<unsigned int> initial_state;                         /** @brief Index of starting  state*/
-    std::optional<std::vector<double>> theta_states;                   /** @brief Target angles for  each state (in radians)*/
+    std::optional<std::vector<std::vector<double>>> transition_matrix;  /** @brief Transition rate matrix  between states*/
+    std::optional<int> initial_state;                                   /** @brief Index of starting  state*/
+    std::optional<std::vector<double>> theta_states;                    /** @brief Target angles for  each state (in radians)*/
 
     /**
      * @brief Parameters for LangevinGillespie simulations, only used within CUDA code
@@ -75,19 +78,19 @@ public:
     struct LGParams {
         // -=-=-=-=-=-=-=-=-= Simulation Parameters -=-=-=-=-=-=-=-=-=
         unsigned int steps; /** @brief  Number of simulation time steps */
-        float dt;           /** @brief Time step size */
+        double dt;          /** @brief Time step size */
         int method;         /** @brief Integration method:  1 -> "heun", 2 -> "euler", or 3 -> "probabilistic"*/
 
         // -=-=-=-=-=-=-=-=-= Physical System Parameters -=-=-=-=-=-=-=-=-=
-        float theta_0;  /** @brief Initial bead position  (radians)*/
-        float kappa;    /** @brief Elastic constant of  the system (pN.nm/rad²)*/
-        float kBT;      /** @brief Thermal energy (pN .nm)*/
-        float gammaB;    /** @brief Rotational friction coefficient  of the bead (pN.nm.s)*/
+        double theta_0;  /** @brief Initial bead position  (radians)*/
+        double kappa;    /** @brief Elastic constant of  the system (pN.nm/rad²)*/
+        double kBT;      /** @brief Thermal energy (pN .nm)*/
+        double gammaB;   /** @brief Rotational friction coefficient  of the bead (pN.nm.s)*/
 
         // -=-=-=-=-=-=-=-=-= Multi-state Parameters -=-=-=-=-=-=-=-=-=
-        unsigned int initial_state;     /** @brief Transition rate matrix  between states*/
-        float theta_states[4];          /** @brief Index of starting  state*/
-        float transition_matrix[4 * 4]; // Flattened 2D matrix /** @brief Target angles for  each state (in radians), flattened 2D matrix*/ 
+        int initial_state;                  /** @brief Transition rate matrix  between states*/
+        double theta_states[4];             /** @brief Index of starting state*/
+        double transition_matrix[4 * 4];    /** @brief Target angles for each state (in radians), flattened 2D matrix*/
     };
 
 
@@ -115,6 +118,7 @@ public:
 
 
     /**
+     * TODO UPDATE ME
      *  @brief Run multiple LangevinGillespie simulations in parallel. nSim is distributed evenly among thread count
      *
      *  Distributes nSim simulations evenly among the number of threads specified. Each simulation will run independently,
@@ -133,12 +137,11 @@ public:
      *  - std::vector<std::vector<int>> states: States for each simulation over time
      *  - std::vector<std::vector<double>> target_thetas: Target thetas for each simulation over time
      * */
-    std::tuple<std::vector<std::vector<double>>, std::vector<std::vector<int>>, std::vector<std::vector<double>>>
-        simulate_multithreaded(
-            unsigned int nSim,
-            unsigned int num_threads,
-            const std::optional<unsigned int>& seed = std::nullopt
-        );
+    py::tuple simulate_multithreaded(
+        unsigned int nSim,
+        unsigned int num_threads,
+        const std::optional<unsigned int>& seed
+    );
 
     /**
      * @brief Run multiple LangevinGillespie simulations on the GPU through CUDA
@@ -150,14 +153,14 @@ public:
      * @param seed Optional RNG integer for local reproducibility. If not provided, simulations are fully randomized.
      *
      * @return A std::tuple containing three Numpy arrays:
-     * - py::array_t<float> bead_positions: Angles of beads for each simulation over time
+     * - py::array_t<double> bead_positions: Angles of beads for each simulation over time
      * - py::array_t<int> states:  States for each simulation over time
-     * - py::array_t<float> target_thetas: Target thetas for each simulation over time
+     * - py::array_t<double> target_thetas: Target thetas for each simulation over time
      *
      * @note CUDA device code cannot access full C++ classes. To navigate this issue, a struct is passed internally.
      *       Use 'to_struct' to convert the class if needed
      */
-    std::tuple<py::array_t<float>, py::array_t<int>, py::array_t<float>>
+    std::tuple<py::array_t<double>, py::array_t<int>, py::array_t<double>>
         simulate_multithreaded_cuda(int nSim, unsigned long long seed);
 
 
@@ -172,8 +175,8 @@ public:
 private:
     // -=-=-=-=-=-=-=-=-= GPU only parameters -=-=-=-=-=-=-=-=-=
 
-    float* d_beads = nullptr;           /** @brief  Device buffer for bead_angles (GPU only, fallback is zero-copy mapping is unavailable)*/
-    float* d_thetas = nullptr;          /** @brief  Device buffer for target_thetas (GPU only, fallback is zero-copy mapping is unavailable)*/
+    double* d_beads = nullptr;           /** @brief  Device buffer for bead_angles (GPU only, fallback is zero-copy mapping is unavailable)*/
+    double* d_thetas = nullptr;          /** @brief  Device buffer for target_thetas (GPU only, fallback is zero-copy mapping is unavailable)*/
     int* d_states = nullptr;            /** @brief  Device buffer for states (GPU only, fallback is zero-copy mapping is unavailable)*/
     LGParams* d_params = nullptr;       /** @brief  Device copy of simulation parameters struct*/
     size_t current_allocated_size = 0;  /** @brief  Tracks current size of the device buffers, in order to avoid repeated cudaMalloc calls*/
@@ -307,8 +310,8 @@ private:
      * - Converts method strings to integers (heun → 0, euler → 1, probabilistic → 2)
      * - Handles optional theta_0, if null uses theta_states[initial_state]
      * - Copies up to 4 target angles into theta states, the rest are zeroed
-     * - Flattens a 4x4 transition matrix into a row major float array. Missing entries are zeroed
-     * - Converts all double values to float in order to reduce CUDA device usage
+     * - Flattens a 4x4 transition matrix into a row major double array. Missing entries are zeroed
+     * - Converts all double values to double in order to reduce CUDA device usage
      *
      * @return LGParams Struct containing all public parameters
      */

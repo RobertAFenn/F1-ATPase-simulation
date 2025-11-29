@@ -162,6 +162,7 @@ angles_all_gpu, states_all_gpu, thetas_all_gpu = LG.simulate_multithreaded_cuda(
 # angles_all_gpu.shape -> (nSim, steps), dtype=float32
 # states_all_gpu.shape -> (nSim, steps), dtype=int32
 # thetas_all_gpu.shape -> (nSim, steps), dtype=float32
+```
 
 ## References
 
