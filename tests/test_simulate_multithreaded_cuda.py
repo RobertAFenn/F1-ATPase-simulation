@@ -1,8 +1,8 @@
-import pytest
 import sys
 from pathlib import Path
 import math
 import numpy as np
+import os
 
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
@@ -31,25 +31,35 @@ def create_valid_LG() -> LangevinGillespie:
     return LG
 
 
-def test_simulate(LG: LangevinGillespie) -> tuple[bool, str]:
+def test_simulate_multithreaded_cuda(
+    LG: LangevinGillespie, nSims: int
+) -> tuple[bool, str]:
     try:
-        a, b, c = LG.simulate()
-        assert isinstance(a, list)
-        assert isinstance(b, list)
-        assert isinstance(c, list)
-        assert all(isinstance(x, float) for x in a)
-        assert all(isinstance(x, int) for x in b)
-        assert all(isinstance(x, float) for x in c)
+        a, b, c = LG.simulate_multithreaded_cuda(nSims)
+        assert isinstance(a, np.ndarray)
+        assert isinstance(b, np.ndarray)
+        assert isinstance(c, np.ndarray)
+
+        assert all(isinstance(arr, np.ndarray) for arr in a)
+        assert all(isinstance(arr, np.ndarray) for arr in b)
+        assert all(isinstance(arr, np.ndarray) for arr in c)
+
+        # Check individual 2D matrix values
+        assert np.issubdtype(a.dtype, np.floating)
+        assert np.issubdtype(b.dtype, np.integer)
+        assert np.issubdtype(c.dtype, np.floating)
+
         return True, "Simulation ran successfully"
+
     except Exception as e:
         return False, f"{e.__class__.__name__}: {e}"
 
 
-def run_boundary_tests(LG, param_name, test_values):
+def run_boundary_tests(LG, param_name, test_values, nSims):
     param_results = []
     for value, should_pass in test_values:
         setattr(LG, param_name, value)
-        actual_pass, msg = test_simulate(LG)
+        actual_pass, msg = test_simulate_multithreaded_cuda(LG, nSims)
 
         passed = (actual_pass and should_pass) or (not actual_pass and not should_pass)
         param_results.append((value, should_pass, passed, msg))
@@ -70,7 +80,7 @@ def run_boundary_tests(LG, param_name, test_values):
 
 
 def print_summary(all_results):
-    print(f"\n{BOLD}【=◈ Summary =◈】{RESET}")
+    print(f"\n{BOLD}【=◈ Summary LG Params Only =◈】{RESET}")
     for param, results in all_results.items():
         param_status = (
             GREEN + "✅" + RESET
@@ -86,35 +96,52 @@ def print_summary(all_results):
                 print(f"        🆗 {RED}{msg}{RESET}")
 
 
+def print_test_result(param, value, passed, msg=None, expect="success"):
+    expected_pass = True if expect == "success" else False
+    correct = passed == expected_pass
+    status_color = GREEN if correct else RED
+    result_text = "PASS" if correct else "FAIL"
+
+    print(
+        f"{PURPLE}Testing {BOLD}{param}{RESET} = {value} (expect {expect}) → {status_color}{result_text}{RESET}"
+    )
+    if msg:
+        print(f"🆗 {RED}{msg}{RESET}")
+
+
 # Test Start
-print("【=◈︿◈=】Starting the LangevinGillespie simulation test!【=◈︿◈=】")
+nSims = 1000
 
 LG = create_valid_LG()
-passed, msg = test_simulate(LG)
-print(
-    f"Valid parameters (expect success) → {GREEN}Pass{RESET}"
-    if passed
-    else f"Unfilled parameter (expected fail) → {GREEN}Pass{RED}\n{msg}{RESET}"
-)
+passed, msg = test_simulate_multithreaded_cuda(LG, nSims)
+print_test_result("Valid LG", nSims, passed, msg, expect="success")
 
 LG = LangevinGillespie()
-passed, msg = test_simulate(LG)
-print(
-    f"Unfilled parameters (expected fail) → {RED}Fail{RESET}"
-    if passed
-    else f"Unfilled parameter (expected fail) → {GREEN}Pass{RED}\n{msg}{RESET}"
-)
+passed, msg = test_simulate_multithreaded_cuda(LG, nSims)
+print_test_result("Unfilled LG", nSims, passed, msg, expect="failure")
+
+# Boundary tests
+print("\nStarting the boundary input test(s)")
+
+nSims = 0
+LG = create_valid_LG()
+passed, msg = test_simulate_multithreaded_cuda(LG, nSims)
+print_test_result("nSims", nSims, passed, msg, expect="failure")
+nSims = 1000
+print()
 
 all_results = {}
 LG = create_valid_LG()
 
-# Boundary tests
-print("\nStaring the boundary input test(s)")
+
 LG, all_results["steps"] = run_boundary_tests(
-    LG, "steps", [(0, False), (1, True), (10_000, True), (100_000, True)]
+    LG,
+    "steps",
+    [(0, False), (1, True), (10_000, True), (100_000, True)],
+    nSims,
 )
 LG, all_results["dt"] = run_boundary_tests(
-    LG, "dt", [(0, False), (0.0001, True), (0.001, True), (0.01, True)]
+    LG, "dt", [(0, False), (0.0001, True), (0.001, True), (0.01, True)], nSims
 )
 LG, all_results["method"] = run_boundary_tests(
     LG,
@@ -125,11 +152,14 @@ LG, all_results["method"] = run_boundary_tests(
         ("euler", True),
         ("probabilistic", True),
     ],
+    nSims,
 )
-LG, all_results["kappa"] = run_boundary_tests(LG, "kappa", [(-1, False), (0, True)])
-LG, all_results["kBT"] = run_boundary_tests(LG, "kBT", [(-1, False), (0, True)])
+LG, all_results["kappa"] = run_boundary_tests(
+    LG, "kappa", [(-1, False), (0, True)], nSims
+)
+LG, all_results["kBT"] = run_boundary_tests(LG, "kBT", [(-1, False), (0, True)], nSims)
 LG, all_results["gammaB"] = run_boundary_tests(
-    LG, "gammaB", [(-1, False), (1e-9, True)]
+    LG, "gammaB", [(-1, False), (1e-9, True)], nSims
 )
 
 # Transition matrix size tests only
@@ -141,11 +171,11 @@ transition_matrices = [
     ([[0.25] * 4] * 4, True),
 ]
 LG, all_results["transition_matrix"] = run_boundary_tests(
-    LG, "transition_matrix", transition_matrices
+    LG, "transition_matrix", transition_matrices, nSims
 )
 
 LG, all_results["initial_state"] = run_boundary_tests(
-    LG, "initial_state", [(0, True), (1, True), (2, True), (3, True)]
+    LG, "initial_state", [(0, True), (1, True), (2, True), (3, True)], nSims
 )
 LG, all_results["theta_states"] = run_boundary_tests(
     LG,
@@ -157,6 +187,7 @@ LG, all_results["theta_states"] = run_boundary_tests(
         ([0, 0, 0, 0], True),
         ([math.pi / 6, math.pi / 4, math.pi / 3, math.pi / 2], True),
     ],
+    nSims,
 )
 
 print_summary(all_results)

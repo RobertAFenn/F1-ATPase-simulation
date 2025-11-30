@@ -59,7 +59,6 @@ extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGPara
     const double two_pi_over_3 = 2.0f * 3.14159265358979323846f / 3.0f;
     const double* trans = params->transition_matrix;
 
-    // init fast Philox RNG: use seed fixed, sequence = idx (one sequence per thread)
     curandStatePhilox4_32_10_t rng;
     curand_init((unsigned long long)seed, (unsigned long long)idx, 0, &rng);
 
@@ -184,7 +183,7 @@ extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParam
     const int initial_state = static_cast<int>(params->initial_state);
     const double theta_0 = params->theta_0;
     const double* theta_states = params->theta_states;
-    const double two_pi_over_3 = 2.0 * 3.14159265358979323846 / 3.0;
+    const double two_pi_over_3 = 2.0 * 3.14159265358979323846 / 3.0; 
     const double* trans = params->transition_matrix;
 
     curandStatePhilox4_32_10_t rng;
@@ -229,8 +228,10 @@ extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParam
 }
 
 std::tuple<py::array_t<double>, py::array_t<int>, py::array_t<double>>
-LangevinGillespie::simulate_multithreaded_cuda(int nSim, unsigned long long seed) {
+LangevinGillespie::simulate_multithreaded_cuda(unsigned int nSim, unsigned long long seed) {
     this->verify_attributes();
+    if (nSim < 1) throw std::invalid_argument("nSim must be greater than 0!");
+
     LGParams h_params = this->to_struct();
     size_t steps = static_cast<size_t>(h_params.steps);
     size_t total_elements = (size_t)nSim * steps;

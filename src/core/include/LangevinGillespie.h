@@ -161,7 +161,7 @@ public:
      *       Use 'to_struct' to convert the class if needed
      */
     std::tuple<py::array_t<double>, py::array_t<int>, py::array_t<double>>
-        simulate_multithreaded_cuda(int nSim, unsigned long long seed);
+        simulate_multithreaded_cuda(unsigned int nSim, unsigned long long seed);
 
 
     /**

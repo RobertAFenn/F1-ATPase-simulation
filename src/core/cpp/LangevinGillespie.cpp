@@ -54,12 +54,13 @@ py::tuple LangevinGillespie::simulate_multithreaded(
     const std::optional<unsigned int>& seed
 ) {
     verify_attributes();
+    if (nSim < 1) throw std::invalid_argument("nSim must be greater than 0!");
 
-    unsigned int sys_thread_count = std::thread::hardware_concurrency();
+    unsigned int sys_thread_count = std::max(1u, std::thread::hardware_concurrency());
     if (num_threads < 1 || num_threads > sys_thread_count) {
         throw std::runtime_error(
-            std::to_string(num_threads) + " is not a valid thread number! "
-            "Must be between 1 and " + std::to_string(sys_thread_count) + "."
+            std::to_string(num_threads) + " is not a valid number for num_threads! "
+            "num_threads must be between 1 and " + std::to_string(sys_thread_count) + "."
         );
     }
 
@@ -104,7 +105,7 @@ py::tuple LangevinGillespie::simulate_multithreaded(
     // Join threads
     for (auto& t : threads) t.join();
 
-    py::gil_scoped_acquire acquire;  // reacquire GIL before returning NumPy arrays
+    py::gil_scoped_acquire acquire;
 
     // Define shapes and strides
     std::vector<ssize_t> shape = { static_cast<ssize_t>(nSim), static_cast<ssize_t>(per_sim_size) };
@@ -159,7 +160,6 @@ void LangevinGillespie::verify_attributes() const {
     if (gammaB.value() < 0) throw std::invalid_argument("Parameter gammaB must be greater than or equal to 0!");
     if (transition_matrix.value().size() != 4) throw std::invalid_argument("transition_matrix must be of size 4. The current size is " + std::to_string(transition_matrix.value().size()));
 
-    // Ensure each row is also 4 and each p is [-1,1]   
     for (size_t i = 0; i < transition_matrix.value().size(); i++) {
         if (transition_matrix.value()[i].size() != 4)
             throw std::invalid_argument("Row " + std::to_string(i) + " of transition_matrix must have 4 columns");
