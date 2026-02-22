@@ -102,7 +102,6 @@ py::tuple LangevinGillespie::simulate_multithreaded(
             });
     }
 
-    // Join threads
     for (auto& t : threads) t.join();
 
     py::gil_scoped_acquire acquire;

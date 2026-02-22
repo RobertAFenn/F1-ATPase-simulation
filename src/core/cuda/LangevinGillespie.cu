@@ -8,20 +8,19 @@
 
 #define CUDA_CHECK(call) do { cudaError_t e = (call); if (e != cudaSuccess) throw std::runtime_error(std::string("CUDA error: ") + cudaGetErrorString(e)); } while(0)
 
-// Device inline helpers (same math as yours)
 __device__ inline double drift_f(double theta, double target_theta, double kappa, double gammaB) {
     return -kappa * (theta - target_theta) / gammaB;
 }
 __device__ inline double diffusion_f(double kBT, double gammaB) {
     return sqrtf(2.0f * kBT / gammaB);
 }
-__device__ inline double euler_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+__device__ inline double euler_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t& rng) {
     double d = drift_f(theta, target_theta, kappa, gammaB);
     double s = diffusion_f(kBT, gammaB) * sqrtf(dt);
     double z = curand_normal(&rng);
     return theta + dt * d + s * z;
 }
-__device__ inline double heun_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+__device__ inline double heun_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t& rng) {
     double d = drift_f(theta, target_theta, kappa, gammaB);
     double s = diffusion_f(kBT, gammaB);
     double eta = curand_normal(&rng);
@@ -29,14 +28,13 @@ __device__ inline double heun_step(double theta, double target_theta, double dt,
     double d_predict = drift_f(predict, target_theta, kappa, gammaB);
     return theta + 0.5f * dt * (d + d_predict) + sqrtf(dt) * s * eta;
 }
-__device__ inline double prob_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t &rng) {
+__device__ inline double prob_step(double theta, double target_theta, double dt, double kappa, double kBT, double gammaB, curandStatePhilox4_32_10_t& rng) {
     double exp_factor = expf(-kappa / gammaB * dt);
     double mean = target_theta + (theta - target_theta) * exp_factor;
     double std_dev = sqrtf(kBT / kappa * (1.0f - exp_factor * exp_factor));
     return mean + std_dev * curand_normal(&rng);
 }
 
-// Common kernel pattern: each kernel implements one integrator so it can be inlined.
 extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGParams* params,
     double* bead_positions_step_major, // layout: [step * nSim + sim]
     int* states_step_major,
@@ -69,7 +67,6 @@ extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGPara
     for (int i = 0; i < steps; ++i) {
         double target_theta = theta_states[state] + cycle * two_pi_over_3;
 
-        // step (Euler)
         theta = euler_step(theta, target_theta, dt, kappa, kBT, gammaB, rng);
 
         // coalesced write: step-major layout so threads write adjacent addresses
@@ -78,9 +75,9 @@ extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGPara
         target_thetas_step_major[base] = target_theta;
         states_step_major[base] = state;
 
-        // Gillespie-like switching per-step
+
         double total_rate = 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
 
         if (total_rate > 0.0f) {
@@ -89,7 +86,7 @@ extern "C" __global__ void simulate_kernel_euler(const LangevinGillespie::LGPara
                 double r = curand_uniform(&rng);
                 double cum = 0.0f;
                 int new_state = state;
-                #pragma unroll
+#pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (j == state) continue;
                     cum += trans[state * 4 + j] / total_rate;
@@ -142,7 +139,7 @@ extern "C" __global__ void simulate_kernel_heun(const LangevinGillespie::LGParam
         states_step_major[base] = state;
 
         double total_rate = 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
 
         if (total_rate > 0.0f) {
@@ -151,7 +148,7 @@ extern "C" __global__ void simulate_kernel_heun(const LangevinGillespie::LGParam
                 double r = curand_uniform(&rng);
                 double cum = 0.0f;
                 int new_state = state;
-                #pragma unroll
+#pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (j == state) continue;
                     cum += trans[state * 4 + j] / total_rate;
@@ -180,10 +177,10 @@ extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParam
     const double kappa = params->kappa;
     const double kBT = params->kBT;
     const double gammaB = params->gammaB;
-    const int initial_state = static_cast<int>(params->initial_state);
+    const int initial_state = static_cast<int>(params->initial_state); // TODO useless cast
     const double theta_0 = params->theta_0;
     const double* theta_states = params->theta_states;
-    const double two_pi_over_3 = 2.0 * 3.14159265358979323846 / 3.0; 
+    const double two_pi_over_3 = 2.0 * 3.14159265358979323846 / 3.0;
     const double* trans = params->transition_matrix;
 
     curandStatePhilox4_32_10_t rng;
@@ -204,7 +201,7 @@ extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParam
         states_step_major[base] = state;
 
         double total_rate = 0.0f;
-        #pragma unroll
+#pragma unroll
         for (int j = 0; j < 4; ++j) if (j != state) total_rate += trans[state * 4 + j];
 
         if (total_rate > 0.0f) {
@@ -213,7 +210,7 @@ extern "C" __global__ void simulate_kernel_prob(const LangevinGillespie::LGParam
                 double r = curand_uniform(&rng);
                 double cum = 0.0f;
                 int new_state = state;
-                #pragma unroll
+#pragma unroll
                 for (int j = 0; j < 4; ++j) {
                     if (j == state) continue;
                     cum += trans[state * 4 + j] / total_rate;
@@ -265,9 +262,9 @@ LangevinGillespie::simulate_multithreaded_cuda(unsigned int nSim, unsigned long 
 
     // choose kernel by method (0=euler,1=heun,2=prob)
     int method = static_cast<int>(h_params.method);
-    if (method == 0) simulate_kernel_euler<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
-    else if (method == 1) simulate_kernel_heun<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
-    else simulate_kernel_prob<<<grid_size, block_size>>>(d_params, d_beads, d_states, d_thetas, nSim, seed);
+    if (method == 0) simulate_kernel_euler << <grid_size, block_size >> > (d_params, d_beads, d_states, d_thetas, nSim, seed);
+    else if (method == 1) simulate_kernel_heun << <grid_size, block_size >> > (d_params, d_beads, d_states, d_thetas, nSim, seed);
+    else simulate_kernel_prob << <grid_size, block_size >> > (d_params, d_beads, d_states, d_thetas, nSim, seed);
 
     // async copy device -> pinned host and synchronize
     CUDA_CHECK(cudaMemcpyAsync(h_beads, d_beads, total_elements * sizeof(double), cudaMemcpyDeviceToHost));
