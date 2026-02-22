@@ -4,6 +4,7 @@
 *.pyo
 *.pyd
 .editorconfig
+main_dev.ipynb
 
 # Directories
 __pycache__/
