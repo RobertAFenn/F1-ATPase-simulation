@@ -7,14 +7,16 @@
 main_dev.ipynb
 
 # Directories
-__pycache__/
-.vscode
-anaconda_projects/
-Python-3.11.8-build/
-/build/
-/bin/
-venv/
-venv
-
-# Jupyter checkpoints
+archive/
 .ipynb_checkpoints/
+__pycache__/
+.vscode/
+venv/
+
+
+bin/*
+!bin/.gitkeep
+
+
+analysis/*
+!analysis/results/

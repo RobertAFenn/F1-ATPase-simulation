@@ -177,9 +177,9 @@ private:
 
     double* d_beads = nullptr;           /** @brief  Device buffer for bead_angles (GPU only, fallback is zero-copy mapping is unavailable)*/
     double* d_thetas = nullptr;          /** @brief  Device buffer for target_thetas (GPU only, fallback is zero-copy mapping is unavailable)*/
-    int* d_states = nullptr;            /** @brief  Device buffer for states (GPU only, fallback is zero-copy mapping is unavailable)*/
-    LGParams* d_params = nullptr;       /** @brief  Device copy of simulation parameters struct*/
-    size_t current_allocated_size = 0;  /** @brief  Tracks current size of the device buffers, in order to avoid repeated cudaMalloc calls*/
+    int* d_states = nullptr;             /** @brief  Device buffer for states (GPU only, fallback is zero-copy mapping is unavailable)*/
+    LGParams* d_params = nullptr;        /** @brief  Device copy of simulation parameters struct*/
+    size_t current_allocated_size = 0;   /** @brief  Tracks current size of the device buffers, in order to avoid repeated cudaMalloc calls*/
 
     // -=-=-=-=-=-=-=-=-= Helper Methods -=-=-=-=-=-=-=-=-=
 

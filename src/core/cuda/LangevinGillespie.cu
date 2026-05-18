@@ -275,10 +275,12 @@ LangevinGillespie::simulate_multithreaded_cuda(unsigned int nSim, unsigned long 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) throw std::runtime_error("CUDA kernel failed: " + std::string(cudaGetErrorString(err)));
 
-    // Build numpy arrays WITHOUT additional copy by setting strides so logical (nSim, steps)
-    // buffer layout is step-major: index = step * nSim + sim
-    // so element (sim, step) in logical array is at offset: step * nSim + sim
-    // therefore strides are: sim_stride = sizeof(element), step_stride = nSim * sizeof(element)
+    /*
+     Build numpy arrays WITHOUT additional copy by setting strides so logical (nSim, steps)
+     buffer layout is step-major: index = step * nSim + sim
+     so element (sim, step) in logical array is at offset: step * nSim + sim
+     therefore strides are: sim_stride = sizeof(element), step_stride = nSim * sizeof(element)
+     */
     auto free_double_host = [](void* p) { if (p) cudaFreeHost(p); };
     auto free_int_host = [](void* p) { if (p) cudaFreeHost(p); };
 
@@ -294,7 +296,6 @@ LangevinGillespie::simulate_multithreaded_cuda(unsigned int nSim, unsigned long 
     py::array py_states(py::buffer_info(h_states, sizeof(int), py::format_descriptor<int>::format(),
         2, { dim0, dim1 }, { sizeof(int), dim0 * sizeof(int) }), states_capsule);
 
-    // free device buffers (keep host pinned buffers for Python's ownership)
     CUDA_CHECK(cudaFree(d_beads));
     CUDA_CHECK(cudaFree(d_thetas));
     CUDA_CHECK(cudaFree(d_states));
