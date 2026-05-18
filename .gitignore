@@ -7,16 +7,11 @@
 main_dev.ipynb
 
 # Directories
+bin/*
+!bin/.gitkeep
+build/
 archive/
 .ipynb_checkpoints/
 __pycache__/
 .vscode/
 venv/
-
-
-bin/*
-!bin/.gitkeep
-
-
-analysis/*
-!analysis/results/
