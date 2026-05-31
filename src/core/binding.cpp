@@ -42,7 +42,7 @@ static unsigned long long make_random_seed64() {
 std::string to_lower(const std::string& str) {
     std::string result = str;
     std::transform(result.begin(), result.end(), result.begin(),
-                   [](unsigned char c){ return std::tolower(c); });
+        [](unsigned char c) { return std::tolower(c); });
     return result;
 }
 
@@ -85,6 +85,7 @@ PYBIND11_MODULE(f1sim, m) {
             "Returns bead_positions, states, target_thetas")
 
         // -=-=-=-=-=-=-=-=-= GPU (Nvidia) -=-=-=-=-=-=-=-=-=
+#ifndef CPU_ONLY
         .def("simulate_multithreaded_cuda",
             [](LangevinGillespie& self,
                 int nSim,
@@ -98,6 +99,7 @@ PYBIND11_MODULE(f1sim, m) {
             py::arg("nSim"),
             py::arg("seed") = std::nullopt,
             "Run multiple Langevin simulations on GPU via CUDA.\n"
-            "If base_seed is omitted (None), a random 64-bit seed is generated at the binding level.");
-
+            "If base_seed is omitted (None), a random 64-bit seed is generated at the binding level.")
+#endif
+        ; // Required for .def chaining
 }

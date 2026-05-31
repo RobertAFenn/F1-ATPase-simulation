@@ -160,9 +160,10 @@ public:
      * @note CUDA device code cannot access full C++ classes. To navigate this issue, a struct is passed internally.
      *       Use 'to_struct' to convert the class if needed
      */
+#ifndef CPU_ONLY
     std::tuple<py::array_t<double>, py::array_t<int>, py::array_t<double>>
         simulate_multithreaded_cuda(unsigned int nSim, unsigned long long seed);
-
+#endif
 
     /**
      * @brief Compute rotational friction coefficient of the bead.

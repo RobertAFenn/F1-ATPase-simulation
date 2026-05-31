@@ -1,141 +1,148 @@
-# setup.py
-from setuptools import setup, Extension
-from setuptools.command.build_ext import build_ext
+import os
+import sys
+import shutil
 import subprocess
 import sysconfig
-import pybind11
-import os
-import shutil
-from distutils.cmd import Command
+from setuptools import setup, Extension
+from setuptools.command.build_ext import build_ext
 
-# C++ and NVCC compilation flags
-CXX_FLAGS = ["-O3", "-std=c++20", "-fPIC", "-Wall"]
-NVCC_FLAGS = ["-O3", "--expt-relaxed-constexpr", "-Xcompiler", "-fPIC", "-std=c++20"]
-
-
-def find_cuda_libdir():
-    for d in ["/usr/local/cuda/lib64", "/usr/local/cuda/lib"]:
-        if os.path.isdir(d):
-            return d
-    return "/usr/local/cuda/lib64"
+FORCE_CPU = False
+if "--cpu-only" in sys.argv:
+    FORCE_CPU = True
+    sys.argv.remove("--cpu-only")
 
 
-class get_pybind_include(object):
-    def __str__(self):
-        return pybind11.get_include()
+def has_nvidia_gpu():
+    if FORCE_CPU:
+        print("[-] --cpu-only flag detected. Forcing CPU-only compilation.")
+        return False
+    nvcc_available = shutil.which("nvcc") is not None
+    nvidia_smi_available = False
+    try:
+        subprocess.run(
+            ["nvidia-smi"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True,
+        )
+        nvidia_smi_available = True
+    except (FileNotFoundError, subprocess.CalledProcessError, OSError):
+        pass
+    return nvcc_available and nvidia_smi_available
 
 
-class BuildExtension(build_ext):
+def get_cuda_lib_dir():
+    if sys.platform.startswith("win"):
+        cuda_path = os.environ.get("CUDA_PATH")
+        if cuda_path:
+            return os.path.join(cuda_path, "lib", "x64")
+    else:
+        for path in ["/usr/local/cuda/lib64", "/usr/lib/cuda/lib64"]:
+            if os.path.exists(path):
+                return path
+    return None
+
+
+class CustomBuildExt(build_ext):
     def build_extensions(self):
-        py_inc = sysconfig.get_paths()["include"]
+        try:
+            import pybind11
+        except ImportError:
+            raise RuntimeError("pybind11 is required to build this extension.")
+
         for ext in self.extensions:
-            ext.include_dirs += [py_inc, str(get_pybind_include())]
+            ext.include_dirs.append(pybind11.get_include())
+            is_windows = self.compiler.compiler_type == "msvc"
 
-            # Compile CUDA sources first
-            self._compile_cuda_sources(ext)
+            # Using C++20 for std::numbers support
+            if is_windows:
+                ext.extra_compile_args.append("/std:c++20")
+                ext.extra_compile_args.append("/O2")
+            else:
+                ext.extra_compile_args.append("-std=c++20")
+                ext.extra_compile_args.append("-O3")
 
-            # Add C++ flags
-            ext.extra_compile_args = list(CXX_FLAGS)
+            cu_sources = [s for s in ext.sources if s.endswith(".cu")]
+            cpp_sources = [s for s in ext.sources if not s.endswith(".cu")]
 
-            # CUDA linkage
-            cuda_libdir = find_cuda_libdir()
-            ext.library_dirs = ext.library_dirs or []
-            if cuda_libdir not in ext.library_dirs:
-                ext.library_dirs.append(cuda_libdir)
-            ext.libraries = ext.libraries or []
-            if "cudart" not in ext.libraries:
+            if cu_sources:
+                nvcc = shutil.which("nvcc")
+                python_includes = [
+                    sysconfig.get_path("include"),
+                    sysconfig.get_path("platinclude"),
+                ]
+
+                for cu_file in cu_sources:
+                    obj_ext = ".obj" if is_windows else ".o"
+                    obj_file = os.path.join(
+                        self.build_temp, os.path.basename(cu_file) + obj_ext
+                    )
+                    os.makedirs(self.build_temp, exist_ok=True)
+
+                    nvcc_cmd = [
+                        nvcc,
+                        "-c",
+                        cu_file,
+                        "-o",
+                        obj_file,
+                        "-O3",
+                        "-std=c++20",
+                    ]
+                    for inc in ext.include_dirs:
+                        nvcc_cmd.append(f"-I{inc}")
+                    for inc in python_includes:
+                        if inc and os.path.exists(inc):
+                            nvcc_cmd.append(f"-I{inc}")
+                    for macro, value in ext.define_macros:
+                        nvcc_cmd.append(
+                            f"-D{macro}" if value is None else f"-D{macro}={value}"
+                        )
+
+                    if not is_windows:
+                        nvcc_cmd.extend(["-Xcompiler", "-fPIC"])
+                    subprocess.check_call(nvcc_cmd)
+                    ext.extra_objects.append(obj_file)
+
+                ext.sources = cpp_sources
                 ext.libraries.append("cudart")
-            ext.extra_link_args = ext.extra_link_args or []
-            ext.extra_link_args += [f"-L{cuda_libdir}", "-lcudart"]
+                cuda_lib_dir = get_cuda_lib_dir()
+                if cuda_lib_dir:
+                    ext.library_dirs.append(cuda_lib_dir)
 
         super().build_extensions()
 
-        self._move_so_to_bin()  # Move the so file
-
-    def _compile_cuda_sources(self, ext):
-        sources = list(ext.sources)
-        new_sources = []
-        extra_objects = list(getattr(ext, "extra_objects", []))
-        for src in sources:
-            if src.endswith(".cu"):
-                obj_file = os.path.splitext(src)[0] + ".o"
-                cmd = ["nvcc", "-c", src, "-o", obj_file] + NVCC_FLAGS
-                for inc in ext.include_dirs:
-                    cmd += ["-I", inc]
-                print("Compiling CUDA:", " ".join(cmd))
-                subprocess.check_call(cmd)
-                extra_objects.append(obj_file)
-            else:
-                new_sources.append(src)
-        ext.sources = new_sources
-        ext.extra_objects = extra_objects
-
-    def _move_so_to_bin(self):
-        build_lib = self.build_lib
-        for ext in self.extensions:
-            so_name = self.get_ext_filename(ext.name)
-            src_path = os.path.join(build_lib, so_name)
-            bin_dir = os.path.join(os.getcwd(), "bin")
-            os.makedirs(bin_dir, exist_ok=True)
-            dst_path = os.path.join(bin_dir, os.path.basename(so_name))
-            if os.path.exists(src_path):
-                shutil.copy2(src_path, dst_path)
-                print(f"Moved {src_path} -> {dst_path}")
+        bin_dir = "bin"
+        os.makedirs(bin_dir, exist_ok=True)
+        
+        if os.path.exists(self.build_lib):
+            for root, dirs, files in os.walk(self.build_lib):
+                for file in files:
+                    if file.endswith(".so") or file.endswith(".pyd"):
+                        shutil.copy2(
+                            os.path.join(root, file), os.path.join(bin_dir, file)
+                        )
+                        print(f"[+] Copied {file} to {bin_dir}/")
 
 
-ext_modules = [
-    Extension(
-        "f1sim",
-        sources=[
-            "src/core/binding.cpp",
-            "src/core/cpp/LangevinGillespie.cpp",
-            "src/core/cuda/LangevinGillespie.cu",
-        ],
-        include_dirs=[
-            str(get_pybind_include()),
-            "src/core/include",
-        ],
-        language="c++",
-        extra_objects=[],  # .o files from will be added automatically
-    )
-]
-
-
-class Clean(Command):
-    description = "Remove build directories + compiled .o object files"
-    user_options = []
-
-    def initialize_options(self):
-        pass
-
-    def finalize_options(self):
-        pass
-
-    def run(self):
-        # Remove build/ and dist/
-        for folder in ["build", "dist", "__pycache__"]:
-            if os.path.exists(folder):
-                shutil.rmtree(folder)
-                print(f"Removed {folder}/")
-
-        # Remove compiled CUDA object files
-        for root, _, files in os.walk("src"):
-            for f in files:
-                if f.endswith(".o"):
-                    filepath = os.path.join(root, f)
-                    os.remove(filepath)
-                    print(f"Deleted {filepath}")
-
-        print("Cleanup complete.")
-
+source_files = ["src/core/binding.cpp", "src/core/cpp/LangevinGillespie.cpp"]
+macros = []
+if has_nvidia_gpu():
+    source_files.append("src/core/cuda/LangevinGillespie.cu")
+    macros.append(("HAS_CUDA", "1"))
+else:
+    macros.append(("CPU_ONLY", "1"))
 
 setup(
     name="f1sim",
-    version="0.1",
-    author="Robert",
-    ext_modules=ext_modules,
-    cmdclass={
-        "build_ext": BuildExtension,
-        "clean": Clean,
-    },
+    version="1.0.0",
+    ext_modules=[
+        Extension(
+            "f1sim",
+            sources=source_files,
+            include_dirs=["src/core/include"],
+            define_macros=macros,
+            language="c++",
+        )
+    ],
+    cmdclass={"build_ext": CustomBuildExt},
 )
